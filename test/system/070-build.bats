@@ -231,7 +231,11 @@ EOF
 
     # Now delete all built images. If any image wasn't built, rmi will fail
     # and test will fail.
-    run_podman rmi $(seq --format 'i%02g' 1 $count)
+    for i in $(seq --format 'i%02g' 1 $count); do
+	# TODO: call this rmi in single call instead of using for loop here
+	# once untagging starts using RemoveNames instead of SetNames
+	run_podman rmi $i
+    done
 }
 
 @test "podman build - URLs" {
