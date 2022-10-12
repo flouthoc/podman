@@ -73,12 +73,18 @@ The ps library is compatible with all AIX format descriptors of the ps command-l
   - Set of inheritable capabilities. See capabilities(7) for more information.
 - **capprm**
   - Set of permitted capabilities. See capabilities(7) for more information.
+- **groups**
+  - Supplmentary groups inside the container.
 - **hgroup**
   - The corresponding effective group of a container process on the host.
+- **hgroups**
+  - Supplmentary groups on the host.
 - **hpid**
   - The corresponding host PID of a container process.
 - **huser**
   - The corresponding effective user of a container process on the host.
+- **huid**
+  - The corresponding host UID of a container process.
 - **label**
   - Current security attributes of the process.
 - **seccomp**
