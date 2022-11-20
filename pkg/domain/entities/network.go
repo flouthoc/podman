@@ -42,6 +42,7 @@ type NetworkRmReport struct {
 // NetworkCreateOptions describes options to create a network
 type NetworkCreateOptions struct {
 	DisableDNS bool
+	NetworkDNSServers []string
 	Driver     string
 	Gateways   []net.IP
 	Internal   bool
@@ -52,6 +53,12 @@ type NetworkCreateOptions struct {
 	IPv6       bool
 	// Mapping of driver options and values.
 	Options map[string]string
+}
+
+// NetworkUpdateOptions describes options to update a network
+type NetworkUpdateOptions struct {
+	AddDNSServers []string
+	RemoveDNSServers []string
 }
 
 // NetworkCreateReport describes a created network for the cli

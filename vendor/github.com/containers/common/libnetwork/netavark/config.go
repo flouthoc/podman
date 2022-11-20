@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+	"reflect"
 
 	internalutil "github.com/containers/common/libnetwork/internal/util"
 	"github.com/containers/common/libnetwork/types"
@@ -36,6 +37,72 @@ func (n *netavarkNetwork) NetworkCreate(net types.Network) (types.Network, error
 	n.networks[network.Name] = network
 	return *network, nil
 }
+
+func sliceContains(s []string, e string) bool {
+    for _, a := range s {
+        if a == e {
+            return true
+        }
+    }
+    return false
+}
+
+func sliceRemoveDuplicates(strList []string) []string {
+    list := []string{}
+    for _, item := range strList {
+        fmt.Println(item)
+        if sliceContains(list, item) == false {
+            list = append(list, item)
+        }
+    }
+    return list
+}
+
+
+
+func (n *netavarkNetwork) NetworkUpdate(name string, options types.NetworkUpdateOptions) error {
+	fmt.Printf("---updating network %+v with opts\n", name, options)
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	err := n.loadNetworks()
+	if err != nil {
+		return err
+	}
+	network, err := n.getNetwork(name)
+	if err != nil {
+		return err
+	}
+	networkDNSServersBefore := network.NetworkDNSServers
+	networkDNSServersAfter := []string{}
+	for _, server := range networkDNSServersBefore {
+		if sliceContains(options.RemoveDNSServers, server) {
+			continue
+		}
+		networkDNSServersAfter = append(networkDNSServersAfter, server)
+	}
+	networkDNSServersAfter = append(networkDNSServersAfter, options.AddDNSServers...)
+	networkDNSServersAfter = sliceRemoveDuplicates(networkDNSServersAfter)
+	network.NetworkDNSServers = networkDNSServersAfter
+	newNetwork := network
+	if !reflect.DeepEqual(networkDNSServersBefore, networkDNSServersAfter) {
+		fmt.Printf("---upating network %+v\n", network)
+		confPath := filepath.Join(n.networkConfigDir, newNetwork.Name+".json")
+		f, err := os.Create(confPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		enc := json.NewEncoder(f)
+		enc.SetIndent("", "     ")
+		err = enc.Encode(newNetwork)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 
 func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (*types.Network, error) {
 	// if no driver is set use the default one

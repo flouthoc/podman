@@ -12,6 +12,10 @@ import (
 	"github.com/containers/podman/v4/pkg/errorhandling"
 )
 
+func (ic *ContainerEngine) NetworkUpdate(ctx context.Context, netName string, options entities.NetworkUpdateOptions) error {
+	return nil
+}
+
 func (ic *ContainerEngine) NetworkList(ctx context.Context, opts entities.NetworkListOptions) ([]types.Network, error) {
 	options := new(network.ListOptions).WithFilters(opts.Filters)
 	return network.List(ic.ClientCtx, options)

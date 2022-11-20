@@ -33,6 +33,10 @@ func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
 	return *network.libpodNet, nil
 }
 
+func (n *cniNetwork) NetworkUpdate(name string, options types.NetworkUpdateOptions) error {
+	return nil
+}
+
 // networkCreate will fill out the given network struct and return the new network entry.
 // If defaultNet is true it will not validate against used subnets and it will not write the cni config to disk.
 func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (*network, error) {

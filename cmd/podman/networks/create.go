@@ -78,6 +78,10 @@ func networkCreateFlags(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc(subnetFlagName, completion.AutocompleteNone)
 
 	flags.BoolVar(&networkCreateOptions.DisableDNS, "disable-dns", false, "disable dns plugin")
+
+	dnsserverFlagName := "network-dns-servers"
+	flags.StringArrayVar(&networkCreateOptions.NetworkDNSServers, dnsserverFlagName, nil, "network level nameservers")
+	_ = cmd.RegisterFlagCompletionFunc(dnsserverFlagName, completion.AutocompleteNone)
 }
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -111,6 +115,7 @@ func networkCreate(cmd *cobra.Command, args []string) error {
 		Labels:      networkCreateOptions.Labels,
 		IPv6Enabled: networkCreateOptions.IPv6,
 		DNSEnabled:  !networkCreateOptions.DisableDNS,
+		NetworkDNSServers: networkCreateOptions.NetworkDNSServers,
 		Internal:    networkCreateOptions.Internal,
 	}
 

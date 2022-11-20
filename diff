@@ -1,0 +1,236 @@
+diff --git a/cmd/podman/networks/create.go b/cmd/podman/networks/create.go
+index 8b0ebeb2b..9252ed056 100644
+--- a/cmd/podman/networks/create.go
++++ b/cmd/podman/networks/create.go
+@@ -78,6 +78,10 @@ func networkCreateFlags(cmd *cobra.Command) {
+ 	_ = cmd.RegisterFlagCompletionFunc(subnetFlagName, completion.AutocompleteNone)
+ 
+ 	flags.BoolVar(&networkCreateOptions.DisableDNS, "disable-dns", false, "disable dns plugin")
++
++	dnsserverFlagName := "network-dns-servers"
++	flags.StringArrayVar(&networkCreateOptions.NetworkDNSServers, dnsserverFlagName, nil, "network level nameservers")
++	_ = cmd.RegisterFlagCompletionFunc(dnsserverFlagName, completion.AutocompleteNone)
+ }
+ func init() {
+ 	registry.Commands = append(registry.Commands, registry.CliCommand{
+@@ -111,6 +115,7 @@ func networkCreate(cmd *cobra.Command, args []string) error {
+ 		Labels:      networkCreateOptions.Labels,
+ 		IPv6Enabled: networkCreateOptions.IPv6,
+ 		DNSEnabled:  !networkCreateOptions.DisableDNS,
++		NetworkDNSServers: networkCreateOptions.NetworkDNSServers,
+ 		Internal:    networkCreateOptions.Internal,
+ 	}
+ 
+diff --git a/pkg/domain/entities/engine_container.go b/pkg/domain/entities/engine_container.go
+index 44c4f2e4b..3b95f0e9a 100644
+--- a/pkg/domain/entities/engine_container.go
++++ b/pkg/domain/entities/engine_container.go
+@@ -64,6 +64,7 @@ type ContainerEngine interface { //nolint:interfacebloat
+ 	KubeApply(ctx context.Context, body io.Reader, opts ApplyOptions) error
+ 	NetworkConnect(ctx context.Context, networkname string, options NetworkConnectOptions) error
+ 	NetworkCreate(ctx context.Context, network types.Network) (*types.Network, error)
++	NetworkUpdate(ctx context.Context, networkname string, options NetworkUpdateOptions) error
+ 	NetworkDisconnect(ctx context.Context, networkname string, options NetworkDisconnectOptions) error
+ 	NetworkExists(ctx context.Context, networkname string) (*BoolReport, error)
+ 	NetworkInspect(ctx context.Context, namesOrIds []string, options InspectOptions) ([]types.Network, []error, error)
+diff --git a/pkg/domain/entities/network.go b/pkg/domain/entities/network.go
+index 9e59953c6..2d788566c 100644
+--- a/pkg/domain/entities/network.go
++++ b/pkg/domain/entities/network.go
+@@ -42,6 +42,7 @@ type NetworkRmReport struct {
+ // NetworkCreateOptions describes options to create a network
+ type NetworkCreateOptions struct {
+ 	DisableDNS bool
++	NetworkDNSServers []string
+ 	Driver     string
+ 	Gateways   []net.IP
+ 	Internal   bool
+@@ -54,6 +55,12 @@ type NetworkCreateOptions struct {
+ 	Options map[string]string
+ }
+ 
++// NetworkUpdateOptions describes options to update a network
++type NetworkUpdateOptions struct {
++	AddDNSServers []string
++	RemoveDNSServers []string
++}
++
+ // NetworkCreateReport describes a created network for the cli
+ type NetworkCreateReport struct {
+ 	Name string
+diff --git a/pkg/domain/infra/abi/network.go b/pkg/domain/infra/abi/network.go
+index a6188255b..f6d3a43f8 100644
+--- a/pkg/domain/infra/abi/network.go
++++ b/pkg/domain/infra/abi/network.go
+@@ -13,6 +13,17 @@ import (
+ 	"github.com/containers/podman/v4/pkg/domain/entities"
+ )
+ 
++func (ic *ContainerEngine) NetworkUpdate(ctx context.Context, netName string, options entities.NetworkUpdateOptions) error {
++	var networkUpdateOptions types.NetworkUpdateOptions
++	networkUpdateOptions.AddDNSServers = options.AddDNSServers
++	networkUpdateOptions.RemoveDNSServers = options.RemoveDNSServers
++	err := ic.Libpod.Network().NetworkUpdate(netName, networkUpdateOptions)
++	if err != nil {
++		return err
++	}
++	return nil
++}
++
+ func (ic *ContainerEngine) NetworkList(ctx context.Context, options entities.NetworkListOptions) ([]types.Network, error) {
+ 	// dangling filter is not provided by netutil
+ 	var wantDangling bool
+diff --git a/pkg/domain/infra/tunnel/network.go b/pkg/domain/infra/tunnel/network.go
+index 6e27b8e56..24ec8f110 100644
+--- a/pkg/domain/infra/tunnel/network.go
++++ b/pkg/domain/infra/tunnel/network.go
+@@ -12,6 +12,10 @@ import (
+ 	"github.com/containers/podman/v4/pkg/errorhandling"
+ )
+ 
++func (ic *ContainerEngine) NetworkUpdate(ctx context.Context, netName string, options entities.NetworkUpdateOptions) error {
++	return nil
++}
++
+ func (ic *ContainerEngine) NetworkList(ctx context.Context, opts entities.NetworkListOptions) ([]types.Network, error) {
+ 	options := new(network.ListOptions).WithFilters(opts.Filters)
+ 	return network.List(ic.ClientCtx, options)
+diff --git a/vendor/github.com/containers/common/libnetwork/cni/config.go b/vendor/github.com/containers/common/libnetwork/cni/config.go
+index aa94e73d1..783944be8 100644
+--- a/vendor/github.com/containers/common/libnetwork/cni/config.go
++++ b/vendor/github.com/containers/common/libnetwork/cni/config.go
+@@ -33,6 +33,10 @@ func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
+ 	return *network.libpodNet, nil
+ }
+ 
++func (n *cniNetwork) NetworkUpdate(name string, options types.NetworkUpdateOptions) error {
++	return nil
++}
++
+ // networkCreate will fill out the given network struct and return the new network entry.
+ // If defaultNet is true it will not validate against used subnets and it will not write the cni config to disk.
+ func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (*network, error) {
+diff --git a/vendor/github.com/containers/common/libnetwork/netavark/config.go b/vendor/github.com/containers/common/libnetwork/netavark/config.go
+index e4cd15915..1f0d97faa 100644
+--- a/vendor/github.com/containers/common/libnetwork/netavark/config.go
++++ b/vendor/github.com/containers/common/libnetwork/netavark/config.go
+@@ -12,6 +12,7 @@ import (
+ 	"path/filepath"
+ 	"strconv"
+ 	"time"
++	"reflect"
+ 
+ 	internalutil "github.com/containers/common/libnetwork/internal/util"
+ 	"github.com/containers/common/libnetwork/types"
+@@ -37,6 +38,72 @@ func (n *netavarkNetwork) NetworkCreate(net types.Network) (types.Network, error
+ 	return *network, nil
+ }
+ 
++func sliceContains(s []string, e string) bool {
++    for _, a := range s {
++        if a == e {
++            return true
++        }
++    }
++    return false
++}
++
++func sliceRemoveDuplicates(strList []string) []string {
++    list := []string{}
++    for _, item := range strList {
++        fmt.Println(item)
++        if sliceContains(list, item) == false {
++            list = append(list, item)
++        }
++    }
++    return list
++}
++
++
++
++func (n *netavarkNetwork) NetworkUpdate(name string, options types.NetworkUpdateOptions) error {
++	fmt.Printf("---updating network %+v with opts\n", name, options)
++	n.lock.Lock()
++	defer n.lock.Unlock()
++	err := n.loadNetworks()
++	if err != nil {
++		return err
++	}
++	network, err := n.getNetwork(name)
++	if err != nil {
++		return err
++	}
++	networkDNSServersBefore := network.NetworkDNSServers
++	networkDNSServersAfter := []string{}
++	for _, server := range networkDNSServersBefore {
++		if sliceContains(options.RemoveDNSServers, server) {
++			continue
++		}
++		networkDNSServersAfter = append(networkDNSServersAfter, server)
++	}
++	networkDNSServersAfter = append(networkDNSServersAfter, options.AddDNSServers...)
++	networkDNSServersAfter = sliceRemoveDuplicates(networkDNSServersAfter)
++	network.NetworkDNSServers = networkDNSServersAfter
++	newNetwork := network
++	if !reflect.DeepEqual(networkDNSServersBefore, networkDNSServersAfter) {
++		fmt.Printf("---upating network %+v\n", network)
++		confPath := filepath.Join(n.networkConfigDir, newNetwork.Name+".json")
++		f, err := os.Create(confPath)
++		if err != nil {
++			return err
++		}
++		defer f.Close()
++		enc := json.NewEncoder(f)
++		enc.SetIndent("", "     ")
++		err = enc.Encode(newNetwork)
++		if err != nil {
++			return err
++		}
++	}
++
++	return nil
++}
++
++
+ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (*types.Network, error) {
+ 	// if no driver is set use the default one
+ 	if newNetwork.Driver == "" {
+diff --git a/vendor/github.com/containers/common/libnetwork/types/network.go b/vendor/github.com/containers/common/libnetwork/types/network.go
+index e69d6e6e1..e1b484aa8 100644
+--- a/vendor/github.com/containers/common/libnetwork/types/network.go
++++ b/vendor/github.com/containers/common/libnetwork/types/network.go
+@@ -10,6 +10,8 @@ type ContainerNetwork interface {
+ 	// NetworkCreate will take a partial filled Network and fill the
+ 	// missing fields. It creates the Network and returns the full Network.
+ 	NetworkCreate(Network) (Network, error)
++	// NetworkUpdate will take network name and ID and updates network DNS Servers.
++	NetworkUpdate(nameOrID string, options NetworkUpdateOptions) error
+ 	// NetworkRemove will remove the Network with the given name or ID.
+ 	NetworkRemove(nameOrID string) error
+ 	// NetworkList will return all known Networks. Optionally you can
+@@ -56,6 +58,9 @@ type Network struct {
+ 	// DNSEnabled is whether name resolution is active for container on
+ 	// this Network. Only supported with the bridge driver.
+ 	DNSEnabled bool `json:"dns_enabled"`
++	// List of custom DNS server for podman's DNS resolver at network level
++	// Priority order will be kept as defined by user in the configuration.
++	NetworkDNSServers []string `json:"network_dns_servers,omitempty"`
+ 	// Labels is a set of key-value labels that have been applied to the
+ 	// Network.
+ 	Labels map[string]string `json:"labels,omitempty"`
+@@ -275,6 +280,15 @@ type OCICNIPortMapping struct {
+ 	HostIP string `json:"hostIP"`
+ }
+ 
++// NetworkOptions for a given container.
++type NetworkUpdateOptions struct {
++	// List of custom DNS server for podman's DNS resolver.
++	// Priority order will be kept as defined by user in the configuration.
++	AddDNSServers []string `json:"add_dns_servers,omitempty"`
++	RemoveDNSServers []string `json:"remove_dns_servers,omitempty"`
++}
++
++
+ type SetupOptions struct {
+ 	NetworkOptions
+ }
