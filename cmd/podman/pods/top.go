@@ -2,18 +2,18 @@ package pods
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -31,7 +31,6 @@ var (
 		Args:              cobra.ArbitraryArgs,
 		ValidArgsFunction: common.AutocompleteTopCmd,
 		Example: `podman pod top podID
-podman pod top --latest
 podman pod top podID pid seccomp args %C
 podman pod top podID -eo user,pid,comm`,
 	}
@@ -67,7 +66,7 @@ func top(_ *cobra.Command, args []string) error {
 	}
 
 	if len(args) < 1 && !topOptions.Latest {
-		return errors.Errorf("you must provide the name or id of a running pod")
+		return errors.New("you must provide the name or id of a running pod")
 	}
 
 	if topOptions.Latest {

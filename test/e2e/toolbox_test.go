@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 /*
@@ -27,7 +29,6 @@ package integration
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"os/user"
 	"path"
@@ -35,53 +36,27 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containers/podman/v3/pkg/rootless"
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
+	"github.com/containers/podman/v5/libpod/define"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gexec"
 )
 
 var _ = Describe("Toolbox-specific testing", func() {
-	var (
-		tempdir    string
-		err        error
-		podmanTest *PodmanTestIntegration
-	)
-
-	BeforeEach(func() {
-		tempdir, err = CreateTempDirInTempDir()
-		if err != nil {
-			os.Exit(1)
-		}
-		podmanTest = PodmanTestCreate(tempdir)
-		podmanTest.Setup()
-		podmanTest.SeedImages()
-	})
-
-	AfterEach(func() {
-		podmanTest.Cleanup()
-		f := CurrentGinkgoTestDescription()
-		processTestResult(f)
-	})
 
 	It("podman run --dns=none - allows self-management of /etc/resolv.conf", func() {
-		var session *PodmanSessionIntegration
-
-		session = podmanTest.Podman([]string{"run", "--dns", "none", ALPINE, "sh", "-c",
+		session := podmanTest.Podman([]string{"run", "--dns", "none", ALPINE, "sh", "-c",
 			"rm -f /etc/resolv.conf; touch -d '1970-01-01 00:02:03' /etc/resolv.conf; stat -c %s:%Y /etc/resolv.conf"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring("0:123"))
 	})
 
 	It("podman run --no-hosts - allows self-management of /etc/hosts", func() {
-		var session *PodmanSessionIntegration
-
-		session = podmanTest.Podman([]string{"run", "--no-hosts", ALPINE, "sh", "-c",
+		session := podmanTest.Podman([]string{"run", "--no-hosts", ALPINE, "sh", "-c",
 			"rm -f /etc/hosts; touch -d '1970-01-01 00:02:03' /etc/hosts; stat -c %s:%Y /etc/hosts"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring("0:123"))
 	})
 
@@ -89,30 +64,35 @@ var _ = Describe("Toolbox-specific testing", func() {
 		if podmanTest.RemoteTest {
 			Skip("Ulimit check does not work with a remote client")
 		}
+		info := GetHostDistributionInfo()
+		if info.Distribution == "debian" {
+			// "expected 1048576 to be >= 1073741816"
+			Skip("FIXME 2024-05-28 fails on debian, maybe because of systemd 256?")
+		}
 		var session *PodmanSessionIntegration
 		var containerHardLimit int
 		var rlimit syscall.Rlimit
 		var err error
 
 		err = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlimit)
-		Expect(err).To(BeNil())
-		fmt.Printf("Expected value: %d", rlimit.Max)
+		Expect(err).ToNot(HaveOccurred())
+		GinkgoWriter.Printf("Expected value: %d", rlimit.Max)
 
 		session = podmanTest.Podman([]string{"create", "--name", "test", "--ulimit", "host", ALPINE,
 			"sleep", "1000"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		session = podmanTest.Podman([]string{"start", "test"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		session = podmanTest.Podman([]string{"exec", "test", "sh", "-c",
 			"ulimit -H -n"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		containerHardLimit, err = strconv.Atoi(strings.Trim(session.OutputToString(), "\n"))
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 		Expect(containerHardLimit).To(BeNumerically(">=", rlimit.Max))
 	})
 
@@ -122,7 +102,7 @@ var _ = Describe("Toolbox-specific testing", func() {
 		if podmanTest.RemoteTest {
 			Skip("Shm size check does not work with a remote client")
 		}
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CGroupsV1")
+		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		var session *PodmanSessionIntegration
 		var cmd *exec.Cmd
 		var hostShmSize, containerShmSize int
@@ -133,29 +113,29 @@ var _ = Describe("Toolbox-specific testing", func() {
 		// ('1K-blocks') needs to be extracted manually.
 		cmd = exec.Command("df", "/dev/shm")
 		res, err := cmd.Output()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 		lines := strings.SplitN(string(res), "\n", 2)
 		fields := strings.Fields(lines[len(lines)-1])
 		hostShmSize, err = strconv.Atoi(fields[1])
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		session = podmanTest.Podman([]string{"create", "--name", "test", "--ipc=host", "--pid=host", ALPINE,
 			"sleep", "1000"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		session = podmanTest.Podman([]string{"start", "test"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		session = podmanTest.Podman([]string{"exec", "test",
 			"df", "/dev/shm"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		lines = session.OutputToStringArray()
 		fields = strings.Fields(lines[len(lines)-1])
 		containerShmSize, err = strconv.Atoi(fields[1])
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		// In some cases it may happen that the size of /dev/shm is not exactly
 		// equal. Therefore it's fine if there's a slight tolerance between the
@@ -164,34 +144,34 @@ var _ = Describe("Toolbox-specific testing", func() {
 	})
 
 	It("podman create --userns=keep-id --user root:root - entrypoint - entrypoint is executed as root", func() {
-		var session *PodmanSessionIntegration
-
-		session = podmanTest.Podman([]string{"run", "--userns=keep-id", "--user", "root:root", ALPINE,
+		SkipIfNotRootless("only meaningful when run rootless")
+		session := podmanTest.Podman([]string{"run", "--userns=keep-id", "--user", "root:root", ALPINE,
 			"id"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring("uid=0(root) gid=0(root)"))
 	})
 
 	It("podman create --userns=keep-id + podman exec - correct names of user and group", func() {
+		SkipIfNotRootless("only meaningful when run rootless")
 		var session *PodmanSessionIntegration
 		var err error
 
 		currentUser, err := user.Current()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		currentGroup, err := user.LookupGroupId(currentUser.Gid)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		session = podmanTest.Podman([]string{"create", "--name", "test", "--userns=keep-id", ALPINE,
 			"sleep", "1000"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(err).To(BeNil())
+		Expect(session).Should(ExitCleanly())
+		Expect(err).ToNot(HaveOccurred())
 
 		session = podmanTest.Podman([]string{"start", "test"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		expectedOutput := fmt.Sprintf("uid=%s(%s) gid=%s(%s)",
 			currentUser.Uid, currentUser.Username,
@@ -200,146 +180,45 @@ var _ = Describe("Toolbox-specific testing", func() {
 		session = podmanTest.Podman([]string{"exec", "test",
 			"id"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring(expectedOutput))
 	})
 
-	It("podman create --userns=keep-id - entrypoint - adding user with useradd and then removing their password", func() {
-		var session *PodmanSessionIntegration
+	It("podman run --userns=keep-id - modify /etc/passwd and /etc/group", func() {
+		passwdLine := "testuser:x:1001:1001::/home/testuser:/bin/sh"
+		groupLine := "testuser:x:1001:"
 
-		var username string = "testuser"
-		var homeDir string = "/home/testuser"
-		var shell string = "/bin/sh"
-		var uid string = "1001"
-		var gid string = "1001"
-
-		useradd := fmt.Sprintf("useradd --home-dir %s --shell %s --uid %s %s",
-			homeDir, shell, uid, username)
-		passwd := fmt.Sprintf("passwd --delete %s", username)
-		session = podmanTest.Podman([]string{"create", "--log-driver", "k8s-file", "--name", "test", "--userns=keep-id", "--user", "root:root", fedoraToolbox, "sh", "-c",
-			fmt.Sprintf("%s; %s; echo READY; sleep 1000", useradd, passwd)})
+		// ensure that the container can edit passwd and group files
+		session := podmanTest.Podman([]string{"run", "--log-driver", "k8s-file", "--name", "test", "--userns=keep-id",
+			"--user", "root:root", ALPINE, "sh", "-c",
+			fmt.Sprintf("echo %s > /etc/passwd && echo %s > /etc/group && cat /etc/passwd && cat /etc/group", passwdLine, groupLine)})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		session = podmanTest.Podman([]string{"start", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		Expect(WaitContainerReady(podmanTest, "test", "READY", 5, 1)).To(BeTrue())
-
-		expectedOutput := fmt.Sprintf("%s:x:%s:%s::%s:%s",
-			username, uid, gid, homeDir, shell)
-
-		session = podmanTest.Podman([]string{"exec", "test", "cat", "/etc/passwd"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring(expectedOutput))
-
-		expectedOutput = "passwd: Note: deleting a password also unlocks the password."
-
-		session = podmanTest.Podman([]string{"logs", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.ErrorToString()).To(ContainSubstring(expectedOutput))
-	})
-
-	It("podman create --userns=keep-id + podman exec - adding group with groupadd", func() {
-		var session *PodmanSessionIntegration
-
-		var groupName string = "testgroup"
-		var gid string = "1001"
-
-		groupadd := fmt.Sprintf("groupadd --gid %s %s", gid, groupName)
-
-		session = podmanTest.Podman([]string{"create", "--log-driver", "k8s-file", "--name", "test", "--userns=keep-id", "--user", "root:root", fedoraToolbox, "sh", "-c",
-			fmt.Sprintf("%s; echo READY; sleep 1000", groupadd)})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		session = podmanTest.Podman([]string{"start", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		Expect(WaitContainerReady(podmanTest, "test", "READY", 5, 1)).To(BeTrue())
-
-		session = podmanTest.Podman([]string{"exec", "test", "cat", "/etc/group"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring(groupName))
-
-		session = podmanTest.Podman([]string{"logs", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring("READY"))
-	})
-
-	It("podman create --userns=keep-id - entrypoint - modifying existing user with usermod - add to new group, change home/shell/uid", func() {
-		var session *PodmanSessionIntegration
-		var badHomeDir string = "/home/badtestuser"
-		var badShell string = "/bin/sh"
-		var badUID string = "1001"
-		var username string = "testuser"
-		var homeDir string = "/home/testuser"
-		var shell string = "/bin/bash"
-		var uid string = "2000"
-		var groupName string = "testgroup"
-		var gid string = "2000"
-
-		// The use of bad* in the name of variables does not imply the invocation
-		// of useradd should fail The user is supposed to be created successfully
-		// but later his information (uid, home, shell,..) is changed via usermod.
-		useradd := fmt.Sprintf("useradd --home-dir %s --shell %s --uid %s %s",
-			badHomeDir, badShell, badUID, username)
-		groupadd := fmt.Sprintf("groupadd --gid %s %s",
-			gid, groupName)
-		usermod := fmt.Sprintf("usermod --append --groups wheel --home %s --shell %s --uid %s --gid %s %s",
-			homeDir, shell, uid, gid, username)
-
-		session = podmanTest.Podman([]string{"create", "--log-driver", "k8s-file", "--name", "test", "--userns=keep-id", "--user", "root:root", fedoraToolbox, "sh", "-c",
-			fmt.Sprintf("%s; %s; %s; echo READY; sleep 1000", useradd, groupadd, usermod)})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		session = podmanTest.Podman([]string{"start", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		Expect(WaitContainerReady(podmanTest, "test", "READY", 5, 1)).To(BeTrue())
-
-		expectedUser := fmt.Sprintf("%s:x:%s:%s::%s:%s",
-			username, uid, gid, homeDir, shell)
-
-		session = podmanTest.Podman([]string{"exec", "test", "cat", "/etc/passwd"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring(expectedUser))
-
-		session = podmanTest.Podman([]string{"logs", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring("READY"))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).Should(ContainSubstring(passwdLine))
+		Expect(session.OutputToString()).Should(ContainSubstring(groupLine))
 	})
 
 	It("podman run --privileged --userns=keep-id --user root:root - entrypoint - (bind)mounting", func() {
+		SkipIfNotRootless("only meaningful when run rootless")
 		var session *PodmanSessionIntegration
 
 		session = podmanTest.Podman([]string{"run", "--privileged", "--userns=keep-id", "--user", "root:root", ALPINE,
-			"mount", "-t", "tmpfs", "tmpfs", "/tmp"})
+			"mount", "-t", define.TypeTmpfs, define.TypeTmpfs, "/tmp"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		session = podmanTest.Podman([]string{"run", "--privileged", "--userns=keep-id", "--user", "root:root", ALPINE,
 			"mount", "--rbind", "/tmp", "/var/tmp"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 	})
 
-	It("podman create + start - with all needed switches for create - sleep as entry-point", func() {
-		var session *PodmanSessionIntegration
+	It("podman create + start - with all needed switches for create", func() {
+		SkipIfNotRootless("only meaningful when run rootless")
 
 		// These should be most of the switches that Toolbox uses to create a "toolbox" container
-		// https://github.com/containers/toolbox/blob/master/src/cmd/create.go
-		session = podmanTest.Podman([]string{"create",
+		// https://github.com/containers/toolbox/blob/main/src/cmd/create.go
+		session := podmanTest.Podman([]string{"create",
 			"--log-driver", "k8s-file",
 			"--dns", "none",
 			"--hostname", "toolbox",
@@ -354,44 +233,36 @@ var _ = Describe("Toolbox-specific testing", func() {
 			"--ulimit", "host",
 			"--userns=keep-id",
 			"--user", "root:root",
-			fedoraToolbox, "sh", "-c", "echo READY; sleep 1000"})
+			ALPINE, "sh", "-c", "echo READY"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"start", "test"})
+		session = podmanTest.Podman([]string{"start", "-a", "test"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-
-		Expect(WaitContainerReady(podmanTest, "test", "READY", 5, 1)).To(BeTrue())
-
-		session = podmanTest.Podman([]string{"logs", "test"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring("READY"))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).Should(ContainSubstring("READY"))
 	})
 
 	It("podman run --userns=keep-id check $HOME", func() {
+		SkipIfNotRootless("only meaningful when run rootless")
 		var session *PodmanSessionIntegration
-
 		currentUser, err := user.Current()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
-		session = podmanTest.Podman([]string{"run", "-v", fmt.Sprintf("%s:%s", currentUser.HomeDir, currentUser.HomeDir), "--userns=keep-id", fedoraToolbox, "sh", "-c", "echo $HOME"})
+		session = podmanTest.Podman([]string{"run", "-v", fmt.Sprintf("%s:%s", currentUser.HomeDir, currentUser.HomeDir), "--userns=keep-id", ALPINE, "sh", "-c", "echo $HOME"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring(currentUser.HomeDir))
 
-		if rootless.IsRootless() {
-			location := path.Dir(currentUser.HomeDir)
-			volumeArg := fmt.Sprintf("%s:%s", location, location)
-			session = podmanTest.Podman([]string{"run",
-				"--userns=keep-id",
-				"--volume", volumeArg,
-				fedoraToolbox, "sh", "-c", "echo $HOME"})
-			session.WaitWithDefaultTimeout()
-			Expect(session).Should(Exit(0))
-			Expect(session.OutputToString()).To(ContainSubstring(currentUser.HomeDir))
-		}
+		location := path.Dir(currentUser.HomeDir)
+		volumeArg := fmt.Sprintf("%s:%s", location, location)
+		session = podmanTest.Podman([]string{"run",
+			"--userns=keep-id",
+			"--volume", volumeArg,
+			ALPINE, "sh", "-c", "echo $HOME"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).To(ContainSubstring(currentUser.HomeDir))
 	})
 
 })

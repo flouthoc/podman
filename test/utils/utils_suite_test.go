@@ -1,14 +1,13 @@
 package utils_test
 
 import (
-	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 	"testing"
 
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 )
@@ -32,7 +31,7 @@ func FakePodmanTestCreate() *FakePodmanTest {
 	return p
 }
 
-func (p *FakePodmanTest) makeOptions(args []string, noEvents, noCache bool) []string {
+func (p *FakePodmanTest) makeOptions(args []string, options PodmanExecOptions) []string {
 	return FakeOutputs[strings.Join(args, " ")]
 }
 
@@ -41,7 +40,7 @@ func StartFakeCmdSession(args []string) *PodmanSession {
 	command := exec.Command(GoechoPath, args...)
 	session, err := gexec.Start(command, outWriter, errWriter)
 	if err != nil {
-		fmt.Println(err)
+		GinkgoWriter.Println(err)
 	}
 	return &PodmanSession{session}
 }

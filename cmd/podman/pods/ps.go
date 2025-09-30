@@ -2,21 +2,23 @@ package pods
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -24,7 +26,7 @@ var (
 
 	// Command: podman pod _ps_
 	psCmd = &cobra.Command{
-		Use:               "ps  [options]",
+		Use:               "ps [options]",
 		Aliases:           []string{"ls", "list"},
 		Short:             "List pods",
 		Long:              psDescription,
@@ -49,18 +51,16 @@ func init() {
 	flags.BoolVar(&psInput.CtrNames, "ctr-names", false, "Display the container names")
 	flags.BoolVar(&psInput.CtrIds, "ctr-ids", false, "Display the container UUIDs. If no-trunc is not set they will be truncated")
 	flags.BoolVar(&psInput.CtrStatus, "ctr-status", false, "Display the container status")
-	// TODO should we make this a [] ?
 
 	filterFlagName := "filter"
-	flags.StringSliceVarP(&inputFilters, filterFlagName, "f", []string{}, "Filter output based on conditions given")
+	flags.StringArrayVarP(&inputFilters, filterFlagName, "f", []string{}, "Filter output based on conditions given")
 	_ = psCmd.RegisterFlagCompletionFunc(filterFlagName, common.AutocompletePodPsFilters)
 
 	formatFlagName := "format"
 	flags.StringVar(&psInput.Format, formatFlagName, "", "Pretty-print pods to JSON or using a Go template")
-	_ = psCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(ListPodReporter{}))
+	_ = psCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&ListPodReporter{}))
 
-	flags.Bool("noheading", false, "Do not print headers")
-	flags.BoolVar(&psInput.Namespace, "namespace", false, "Display namespace information of the pod")
+	flags.BoolP("noheading", "n", false, "Do not print headers")
 	flags.BoolVar(&psInput.Namespace, "ns", false, "Display namespace information of the pod")
 	flags.BoolVar(&noTrunc, "no-trunc", false, "Do not truncate pod and container IDs")
 	flags.BoolVarP(&psInput.Quiet, "quiet", "q", false, "Print the numeric IDs of the pods only")
@@ -70,6 +70,8 @@ func init() {
 	_ = psCmd.RegisterFlagCompletionFunc(sortFlagName, common.AutocompletePodPsSort)
 
 	validate.AddLatestFlag(psCmd, &psInput.Latest)
+
+	flags.SetNormalizeFunc(utils.AliasFlags)
 }
 
 func pods(cmd *cobra.Command, _ []string) error {
@@ -79,11 +81,11 @@ func pods(cmd *cobra.Command, _ []string) error {
 	if cmd.Flag("filter").Changed {
 		psInput.Filters = make(map[string][]string)
 		for _, f := range inputFilters {
-			split := strings.SplitN(f, "=", 2)
-			if len(split) < 2 {
-				return errors.Errorf("filter input must be in the form of filter=value: %s is invalid", f)
+			fname, filter, hasFilter := strings.Cut(f, "=")
+			if !hasFilter {
+				return fmt.Errorf("filter input must be in the form of filter=value: %s is invalid", f)
 			}
-			psInput.Filters[split[0]] = append(psInput.Filters[split[0]], split[1])
+			psInput.Filters[fname] = append(psInput.Filters[fname], filter)
 		}
 	}
 	responses, err := registry.ContainerEngine().PodPs(context.Background(), psInput)
@@ -110,55 +112,50 @@ func pods(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// Formatted output below
 	lpr := make([]ListPodReporter, 0, len(responses))
 	for _, r := range responses {
 		lpr = append(lpr, ListPodReporter{r})
 	}
 
-	headers := report.Headers(ListPodReporter{}, map[string]string{
-		"Id":                 "POD ID",
-		"Name":               "NAME",
-		"Status":             "STATUS",
-		"Labels":             "LABELS",
-		"NumberOfContainers": "# OF CONTAINERS",
-		"Created":            "CREATED",
-		"InfraID":            "INFRA ID",
-		"ContainerIds":       "IDS",
-		"ContainerNames":     "NAMES",
-		"ContainerStatuses":  "STATUS",
-		"Cgroup":             "CGROUP",
-		"Namespace":          "NAMESPACES",
-	})
-	renderHeaders := true
-	row := podPsFormat()
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+
 	if cmd.Flags().Changed("format") {
-		renderHeaders = report.HasTable(psInput.Format)
-		row = report.NormalizeFormat(psInput.Format)
+		rpt, err = rpt.Parse(report.OriginUser, psInput.Format)
+	} else {
+		rpt, err = rpt.Parse(report.OriginPodman, podPsFormat())
 	}
-	noHeading, _ := cmd.Flags().GetBool("noheading")
-	if noHeading {
+	if err != nil {
+		return err
+	}
+
+	renderHeaders := true
+	if noHeading, _ := cmd.Flags().GetBool("noheading"); noHeading {
 		renderHeaders = false
 	}
-	format := report.EnforceRange(row)
 
-	tmpl, err := report.NewTemplate("list").Parse(format)
-	if err != nil {
-		return err
-	}
+	if renderHeaders && rpt.RenderHeaders {
+		headers := report.Headers(ListPodReporter{}, map[string]string{
+			"Id":                 "POD ID",
+			"Name":               "NAME",
+			"Status":             "STATUS",
+			"Labels":             "LABELS",
+			"NumberOfContainers": "# OF CONTAINERS",
+			"Created":            "CREATED",
+			"InfraID":            "INFRA ID",
+			"ContainerIds":       "IDS",
+			"ContainerNames":     "NAMES",
+			"ContainerStatuses":  "STATUS",
+			"Cgroup":             "CGROUP",
+			"Namespace":          "NAMESPACES",
+			"Restarts":           "RESTARTS",
+		})
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
-	if renderHeaders {
-		if err := tmpl.Execute(w, headers); err != nil {
+		if err := rpt.Execute(headers); err != nil {
 			return err
 		}
 	}
-	return tmpl.Execute(w, lpr)
+	return rpt.Execute(lpr)
 }
 
 func podPsFormat() string {
@@ -183,7 +180,8 @@ func podPsFormat() string {
 	if !psInput.CtrStatus && !psInput.CtrNames && !psInput.CtrIds {
 		row = append(row, "{{.NumberOfContainers}}")
 	}
-	return strings.Join(row, "\t") + "\n"
+
+	return "{{range . }}" + strings.Join(row, "\t") + "\n" + "{{end -}}"
 }
 
 // ListPodReporter is a struct for pod ps output
@@ -199,6 +197,11 @@ func (l ListPodReporter) Created() string {
 // Labels returns a map of the pod's labels
 func (l ListPodReporter) Labels() map[string]string {
 	return l.ListPodsReport.Labels
+}
+
+// Label returns a map of the pod's labels
+func (l ListPodReporter) Label(name string) string {
+	return l.ListPodsReport.Labels[name]
 }
 
 // Networks returns the infra container network names in string format
@@ -218,7 +221,7 @@ func (l ListPodReporter) ID() string {
 }
 
 // Id returns the Pod id
-func (l ListPodReporter) Id() string { // nolint
+func (l ListPodReporter) Id() string {
 	if noTrunc {
 		return l.ListPodsReport.Id
 	}
@@ -232,7 +235,7 @@ func (l ListPodReporter) InfraID() string {
 
 // InfraId returns the infra container id for the pod
 // depending on trunc
-func (l ListPodReporter) InfraId() string { // nolint
+func (l ListPodReporter) InfraId() string {
 	if len(l.ListPodsReport.InfraId) == 0 {
 		return ""
 	}
@@ -270,6 +273,15 @@ func (l ListPodReporter) ContainerStatuses() string {
 	return strings.Join(statuses, ",")
 }
 
+// Restarts returns the total number of restarts for all the containers in the pod
+func (l ListPodReporter) Restarts() string {
+	restarts := 0
+	for _, c := range l.Containers {
+		restarts += int(c.RestartCount)
+	}
+	return strconv.Itoa(restarts)
+}
+
 func sortPodPsOutput(sortBy string, lprs []*entities.ListPodsReport) error {
 	switch sortBy {
 	case "created":
@@ -283,7 +295,7 @@ func sortPodPsOutput(sortBy string, lprs []*entities.ListPodsReport) error {
 	case "status":
 		sort.Sort(podPsSortedStatus{lprs})
 	default:
-		return errors.Errorf("invalid option for --sort, options are: id, names, or number")
+		return errors.New("invalid option for --sort, options are: created, id, name, number, or status")
 	}
 	return nil
 }

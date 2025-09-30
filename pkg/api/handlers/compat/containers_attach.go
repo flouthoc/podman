@@ -1,20 +1,21 @@
+//go:build !remote
+
 package compat
 
 import (
+	"errors"
 	"net/http"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/api/server/idle"
-	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	"github.com/containers/podman/v5/pkg/api/server/idle"
+	api "github.com/containers/podman/v5/pkg/api/types"
 	"github.com/sirupsen/logrus"
 )
 
 func AttachContainer(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
-	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	decoder := utils.GetDecoder(r)
 
 	query := struct {
 		DetachKeys string `schema:"detachKeys"`
@@ -27,7 +28,7 @@ func AttachContainer(w http.ResponseWriter, r *http.Request) {
 		Stream: true,
 	}
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, "Error parsing parameters", http.StatusBadRequest, err)
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -59,13 +60,13 @@ func AttachContainer(w http.ResponseWriter, r *http.Request) {
 		streams = nil
 	}
 	if useStreams && !streams.Stdout && !streams.Stderr && !streams.Stdin {
-		utils.Error(w, "Parameter conflict", http.StatusBadRequest, errors.Errorf("at least one of stdin, stdout, stderr must be true"))
+		utils.Error(w, http.StatusBadRequest, errors.New("at least one of stdin, stdout, stderr must be true"))
 		return
 	}
 
 	// At least one of these must be set
 	if !query.Stream && !query.Logs {
-		utils.Error(w, "Unsupported parameter", http.StatusBadRequest, errors.Errorf("at least one of Logs or Stream must be set"))
+		utils.Error(w, http.StatusBadRequest, errors.New("at least one of Logs or Stream must be set"))
 		return
 	}
 
@@ -76,24 +77,8 @@ func AttachContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := ctr.State()
-	if err != nil {
-		utils.InternalServerError(w, err)
-		return
-	}
-	// For Docker compatibility, we need to re-initialize containers in these states.
-	if state == define.ContainerStateConfigured || state == define.ContainerStateExited {
-		if err := ctr.Init(r.Context(), ctr.PodID() != ""); err != nil {
-			utils.Error(w, "Container in wrong state", http.StatusConflict, errors.Wrapf(err, "error preparing container %s for attach", ctr.ID()))
-			return
-		}
-	} else if !(state == define.ContainerStateCreated || state == define.ContainerStateRunning) {
-		utils.InternalServerError(w, errors.Wrapf(define.ErrCtrStateInvalid, "can only attach to created or running containers - currently in state %s", state.String()))
-		return
-	}
-
 	logErr := func(e error) {
-		logrus.Error(errors.Wrapf(e, "error attaching to container %s", ctr.ID()))
+		logrus.Errorf("Error attaching to container %s: %v", ctr.ID(), e)
 	}
 
 	// Perform HTTP attach.
@@ -104,7 +89,7 @@ func AttachContainer(w http.ResponseWriter, r *http.Request) {
 
 	if <-hijackChan {
 		// If connection was Hijacked, we have to signal it's being closed
-		t := r.Context().Value("idletracker").(*idle.Tracker)
+		t := r.Context().Value(api.IdleTrackerKey).(*idle.Tracker)
 		defer t.Close()
 
 		if err != nil {

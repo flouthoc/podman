@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
+	noHeading            bool
 	showTrustDescription = "Display trust policy for the system"
 	showTrustCommand     = &cobra.Command{
 		Annotations:       map[string]string{registry.EngineMode: registry.ABIMode},
@@ -40,6 +41,7 @@ func init() {
 	showFlags.BoolVar(&showTrustOptions.Raw, "raw", false, "Output raw policy file")
 	_ = showFlags.MarkHidden("policypath")
 	showFlags.StringVar(&showTrustOptions.RegistryPath, "registrypath", "", "")
+	showFlags.BoolVarP(&noHeading, "noheading", "n", false, "Do not print column headings")
 	_ = showFlags.MarkHidden("registrypath")
 }
 
@@ -48,11 +50,12 @@ func showTrust(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if showTrustOptions.Raw {
+
+	switch {
+	case showTrustOptions.Raw:
 		fmt.Println(string(trust.Raw))
 		return nil
-	}
-	if showTrustOptions.JSON {
+	case showTrustOptions.JSON:
 		b, err := json.MarshalIndent(trust.Policies, "", "  ")
 		if err != nil {
 			return err
@@ -60,23 +63,25 @@ func showTrust(cmd *cobra.Command, args []string) error {
 		fmt.Println(string(b))
 		return nil
 	}
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
 
-	format := "{{range . }}{{.RepoName}}\t{{.Type}}\t{{.GPGId}}\t{{.SignatureStore}}\n{{end -}}"
-	tmpl, err := report.NewTemplate("list").Parse(format)
+	hdrs := report.Headers(imageReporter{}, map[string]string{
+		"Transport":      "Transport",
+		"RepoName":       "Name",
+		"Type":           "Type",
+		"GPGId":          "Id",
+		"SignatureStore": "Store",
+	})
+	rpt, err = rpt.Parse(report.OriginPodman,
+		"{{range . }}{{.Transport}}\t{{.RepoName}}\t{{.Type}}\t{{.GPGId}}\t{{.SignatureStore}}\n{{end -}}")
 	if err != nil {
 		return err
 	}
-
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
+	if !noHeading {
+		if err := rpt.Execute(hdrs); err != nil {
+			return err
+		}
 	}
-
-	if err := tmpl.Execute(w, trust.Policies); err != nil {
-		return err
-	}
-	if err := w.Flush(); err != nil {
-		return err
-	}
-	return nil
+	return rpt.Execute(trust.Policies)
 }

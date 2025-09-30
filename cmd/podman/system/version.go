@@ -2,27 +2,29 @@ package system
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
 	versionCommand = &cobra.Command{
 		Use:               "version [options]",
 		Args:              validate.NoArgs,
-		Short:             "Display the Podman Version Information",
+		Short:             "Display the Podman version information",
 		RunE:              version,
 		ValidArgsFunction: completion.AutocompleteNone,
+		Annotations: map[string]string{
+			registry.ParentNSRequired: "",
+		},
 	}
 	versionFormat string
 )
@@ -35,7 +37,7 @@ func init() {
 
 	formatFlagName := "format"
 	flags.StringVarP(&versionFormat, formatFlagName, "f", "", "Change the output format to JSON or a Go template")
-	_ = versionCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(entities.SystemVersionReport{}))
+	_ = versionCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.SystemVersionReport{}))
 }
 
 func version(cmd *cobra.Command, args []string) error {
@@ -53,54 +55,61 @@ func version(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
 	if cmd.Flag("format").Changed {
-		row := report.NormalizeFormat(versionFormat)
-		tmpl, err := report.NewTemplate("version 2.0.0").Parse(row)
+		rpt := report.New(os.Stdout, cmd.Name())
+		defer rpt.Flush()
+
+		// Use OriginUnknown so it does not add an extra range since it
+		// will only be called for a single element and not a slice.
+		rpt, err = rpt.Parse(report.OriginUnknown, versionFormat)
 		if err != nil {
 			return err
 		}
-		if err := tmpl.Execute(w, versions); err != nil {
+		if err := rpt.Execute(versions); err != nil {
+			// only log at debug since we fall back to the client only template
+			logrus.Debugf("Failed to execute template: %v", err)
 			// On Failure, assume user is using older version of podman version --format and check client
-			row = strings.Replace(row, ".Server.", ".", 1)
-			tmpl, err := report.NewTemplate("version 1.0.0").Parse(row)
+			versionFormat = strings.ReplaceAll(versionFormat, ".Server.", ".")
+			rpt, err := rpt.Parse(report.OriginUnknown, versionFormat)
 			if err != nil {
 				return err
 			}
-			if err := tmpl.Execute(w, versions.Client); err != nil {
+			if err := rpt.Execute(versions.Client); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	if versions.Server != nil {
-		if _, err := fmt.Fprintf(w, "Client:\n"); err != nil {
-			return err
-		}
-		formatVersion(w, versions.Client)
-		if _, err := fmt.Fprintf(w, "\nServer:\n"); err != nil {
-			return err
-		}
-		formatVersion(w, versions.Server)
-	} else {
-		formatVersion(w, versions.Client)
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+	rpt, err = rpt.Parse(report.OriginPodman, versionTemplate)
+	if err != nil {
+		return err
 	}
-	return nil
+	return rpt.Execute(versions)
 }
 
-func formatVersion(w io.Writer, version *define.Version) {
-	fmt.Fprintf(w, "Version:\t%s\n", version.Version)
-	fmt.Fprintf(w, "API Version:\t%s\n", version.APIVersion)
-	fmt.Fprintf(w, "Go Version:\t%s\n", version.GoVersion)
-	if version.GitCommit != "" {
-		fmt.Fprintf(w, "Git Commit:\t%s\n", version.GitCommit)
-	}
-	fmt.Fprintf(w, "Built:\t%s\n", version.BuiltTime)
-	fmt.Fprintf(w, "OS/Arch:\t%s\n", version.OsArch)
-}
+const versionTemplate = `{{with .Client -}}
+Client:\tPodman Engine
+Version:\t{{.Version}}
+API Version:\t{{.APIVersion}}
+Go Version:\t{{.GoVersion}}
+{{if .GitCommit -}}Git Commit:\t{{.GitCommit}}\n{{end -}}
+Built:\t{{.BuiltTime}}
+{{if .BuildOrigin -}}Build Origin:\t{{.BuildOrigin}}\n{{end -}}
+OS/Arch:\t{{.OsArch}}
+{{- end}}
+
+{{- if .Server }}{{with .Server}}
+
+Server:\tPodman Engine
+Version:\t{{.Version}}
+API Version:\t{{.APIVersion}}
+Go Version:\t{{.GoVersion}}
+{{if .GitCommit -}}Git Commit:\t{{.GitCommit}}\n{{end -}}
+Built:\t{{.BuiltTime}}
+{{if .BuildOrigin -}}Build Origin:\t{{.BuildOrigin}}\n{{end -}}
+OS/Arch:\t{{.OsArch}}
+{{- end}}{{- end}}
+`

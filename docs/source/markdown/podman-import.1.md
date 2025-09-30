@@ -1,4 +1,4 @@
-% podman-import(1)
+% podman-import 1
 
 ## NAME
 podman\-import - Import a tarball and save it as a filesystem image
@@ -9,7 +9,7 @@ podman\-import - Import a tarball and save it as a filesystem image
 **podman image import** [*options*] *path* [*reference*]
 
 ## DESCRIPTION
-**podman import** imports a tarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz)
+**podman import** imports a tarball (possibly compressed using Gzip, Bzip2, XZ or Zstd)
 and saves it as a filesystem image. Remote tarballs can be specified using a URL.
 Various image instructions can be configured with the **--change** flag and
 a commit message can be set using the **--message** flag.
@@ -19,31 +19,40 @@ Note: `:` is a restricted character and cannot be part of the file name.
 
 ## OPTIONS
 
-#### **--change**=*instruction*, **-c**
+#### **--arch**
+
+Set architecture of the imported image.
+
+#### **--change**, **-c**=*instruction*
 
 Apply the following possible instructions to the created image:
 **CMD** | **ENTRYPOINT** | **ENV** | **EXPOSE** | **LABEL** | **STOPSIGNAL** | **USER** | **VOLUME** | **WORKDIR**
 
 Can be set multiple times
 
+#### **--help**, **-h**
+
+Print usage statement
+
 #### **--message**, **-m**=*message*
 
 Set commit message for imported image
+
+#### **--os**
+
+Set OS of the imported image.
 
 #### **--quiet**, **-q**
 
 Shows progress on the import
 
-**--verbose**
+#### **--variant**
 
-Print additional debugging information
-
-#### **--help**, **-h**
-
-Print usage statement
+Set variant of the imported image.
 
 ## EXAMPLES
 
+Import the selected tarball into new image, specifying the CMD, ENTRYPOINT and LABEL:
 ```
 $ podman import --change CMD=/bin/bash --change ENTRYPOINT=/bin/sh --change LABEL=blue=image ctr.tar image-imported
 Getting image source signatures
@@ -56,6 +65,7 @@ Storing signatures
 db65d991f3bbf7f31ed1064db9a6ced7652e3f8166c4736aa9133dadd3c7acb3
 ```
 
+Import the selected tarball into new image, specifying the CMD, ENTRYPOINT and LABEL:
 ```
 $ podman import --change 'ENTRYPOINT ["/bin/sh","-c","test-image"]'  --change LABEL=blue=image test-image.tar image-imported
 Getting image source signatures
@@ -65,22 +75,14 @@ Writing manifest to image destination
 Storing signatures
 110552350206337183ceadc0bdd646dc356e06514c548b69a8917b4182414b
 ```
-```
-$ podman import --change "CMD /bin/sh"  --change LABEL=blue=image test-image.tar image-imported
-Getting image source signatures
-Copying blob e3b0c44298fc skipped: already exists
-Copying config ae9a27e249 done
-Writing manifest to image destination
-Storing signatures
-ae9a27e249f801aff11a4ba54a81751ea9fbc9db45a6df3f1bfd63fc2437bb9c
-```
 
-
+Import new tagged image from stdin in quiet mode:
 ```
-$ cat ctr.tar | podman -q import --message "importing the ctr.tar tarball" - image-imported
+$ cat ctr.tar | podman -q import --message "importing the ctr.tar file" - image-imported
 db65d991f3bbf7f31ed1064db9a6ced7652e3f8166c4736aa9133dadd3c7acb3
 ```
 
+Import an image from stdin:
 ```
 $ cat ctr.tar | podman import -
 Getting image source signatures
@@ -93,6 +95,7 @@ Storing signatures
 db65d991f3bbf7f31ed1064db9a6ced7652e3f8166c4736aa9133dadd3c7acb3
 ```
 
+Import named image from tarball via a URL:
 ```
 $ podman import http://example.com/ctr.tar url-image
 Downloading from "http://example.com/ctr.tar"
@@ -107,7 +110,7 @@ db65d991f3bbf7f31ed1064db9a6ced7652e3f8166c4736aa9133dadd3c7acb3
 ```
 
 ## SEE ALSO
-podman(1), podman-export(1)
+**[podman(1)](podman.1.md)**, **[podman-export(1)](podman-export.1.md)**
 
 ## HISTORY
 November 2017, Originally compiled by Urvashi Mohnani <umohnani@redhat.com>

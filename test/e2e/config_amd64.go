@@ -1,16 +1,16 @@
+//go:build linux || freebsd
+
 package integration
 
 var (
-	STORAGE_FS               = "vfs"
-	STORAGE_OPTIONS          = "--storage-driver vfs"
-	ROOTLESS_STORAGE_FS      = "vfs"
-	ROOTLESS_STORAGE_OPTIONS = "--storage-driver vfs"
-	CACHE_IMAGES             = []string{ALPINE, BB, fedoraMinimal, nginx, redis, registry, infra, labels, healthcheck, ubi_init, ubi_minimal, fedoraToolbox}
-	nginx                    = "quay.io/libpod/alpine_nginx:latest"
-	BB_GLIBC                 = "docker.io/library/busybox:glibc"
-	registry                 = "quay.io/libpod/registry:2.6"
-	labels                   = "quay.io/libpod/alpine_labels:latest"
-	ubi_minimal              = "registry.access.redhat.com/ubi8-minimal"
-	ubi_init                 = "registry.access.redhat.com/ubi8-init"
-	cirros                   = "quay.io/libpod/cirros:latest"
+	STORAGE_FS          = "overlay"
+	STORAGE_OPTIONS     = "--storage-driver overlay"
+	ROOTLESS_STORAGE_FS = "overlay"
+	CACHE_IMAGES        = []string{ALPINE, BB, NGINX_IMAGE, REDIS_IMAGE, REGISTRY_IMAGE, INFRA_IMAGE, CITEST_IMAGE, HEALTHCHECK_IMAGE, SYSTEMD_IMAGE}
+	NGINX_IMAGE         = "quay.io/libpod/alpine_nginx:latest"
+	BB_GLIBC            = "docker.io/library/busybox:glibc"
+	REGISTRY_IMAGE      = "quay.io/libpod/registry:2.8.2"
+	CITEST_IMAGE        = "quay.io/libpod/testimage:20241011"
+	SYSTEMD_IMAGE       = "quay.io/libpod/systemd-image:20240124"
+	CIRROS_IMAGE        = "quay.io/libpod/cirros:latest"
 )

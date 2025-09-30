@@ -6,8 +6,8 @@
 	function set. (except boolean, hidden and deprecated flags)
 
 	Shell completion functions are defined in:
-	- "github.com/containers/podman/v3/cmd/podman/common/completion.go"
-	- "github.com/containers/common/pkg/completion"
+	- "github.com/containers/podman/v5/cmd/podman/common/completion.go"
+	- "go.podman.io/common/pkg/completion"
 	and are called Autocomplete...
 
 	To apply such function to a command use the ValidArgsFunction field.
@@ -33,7 +33,9 @@ func TestShellCompletionFunctions(t *testing.T) {
 func checkCommand(t *testing.T, cmd *cobra.Command) {
 	if cmd.HasSubCommands() {
 		for _, childCmd := range cmd.Commands() {
-			checkCommand(t, childCmd)
+			if !childCmd.Hidden {
+				checkCommand(t, childCmd)
+			}
 		}
 
 		// if not check if completion for that command is provided

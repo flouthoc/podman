@@ -1,15 +1,17 @@
+//go:build !remote
+
 package terminal
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 
-	"github.com/containers/podman/v3/libpod/define"
-	lsignal "github.com/containers/podman/v3/pkg/signal"
+	lsignal "github.com/containers/podman/v5/pkg/signal"
 	"github.com/moby/term"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/resize"
 )
 
 // RawTtyFormatter ...
@@ -18,20 +20,20 @@ type RawTtyFormatter struct {
 
 // getResize returns a TerminalSize command matching stdin's current
 // size on success, and nil on errors.
-func getResize() *define.TerminalSize {
+func getResize() *resize.TerminalSize {
 	winsize, err := term.GetWinsize(os.Stdin.Fd())
 	if err != nil {
 		logrus.Warnf("Could not get terminal size %v", err)
 		return nil
 	}
-	return &define.TerminalSize{
+	return &resize.TerminalSize{
 		Width:  winsize.Width,
 		Height: winsize.Height,
 	}
 }
 
 // Helper for prepareAttach - set up a goroutine to generate terminal resize events
-func resizeTty(ctx context.Context, resize chan define.TerminalSize) {
+func resizeTty(ctx context.Context, resize chan resize.TerminalSize) {
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, lsignal.SIGWINCH)
 	go func() {
@@ -78,7 +80,7 @@ func (f *RawTtyFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	return bytes, err
 }
 
-func handleTerminalAttach(ctx context.Context, resize chan define.TerminalSize) (context.CancelFunc, *term.State, error) {
+func handleTerminalAttach(ctx context.Context, resize chan resize.TerminalSize) (context.CancelFunc, *term.State, error) {
 	logrus.Debugf("Handling terminal attach")
 
 	subCtx, cancel := context.WithCancel(ctx)
@@ -89,7 +91,7 @@ func handleTerminalAttach(ctx context.Context, resize chan define.TerminalSize) 
 	if err != nil {
 		// allow caller to not have to do any cleaning up if we error here
 		cancel()
-		return nil, nil, errors.Wrapf(err, "unable to save terminal state")
+		return nil, nil, fmt.Errorf("unable to save terminal state: %w", err)
 	}
 
 	logrus.SetFormatter(&RawTtyFormatter{})

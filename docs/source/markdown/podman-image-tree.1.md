@@ -1,7 +1,7 @@
-% podman-image-tree(1)
+% podman-image-tree 1
 
 ## NAME
-podman\-image\-tree - Prints layer hierarchy of an image in a tree format
+podman\-image\-tree - Print layer hierarchy of an image in a tree format
 
 ## SYNOPSIS
 **podman image tree** [*options*] *image:tag*|*image-id*
@@ -9,7 +9,7 @@ podman\-image\-tree - Prints layer hierarchy of an image in a tree format
 
 ## DESCRIPTION
 Prints layer hierarchy of an image in a tree format.
-If you do not provide a *tag*, Podman will default to `latest` for the *image*.
+If no *tag* is provided, Podman defaults to `latest` for the *image*.
 Layers are indicated with image tags as `Top Layer of`, when the tag is known locally.
 ## OPTIONS
 
@@ -23,10 +23,8 @@ Show all child images and layers of the specified image
 
 ## EXAMPLES
 
+List image tree information on specified image:
 ```
-$ podman pull docker.io/library/wordpress
-$ podman pull docker.io/library/php:7.2-apache
-
 $ podman image tree docker.io/library/wordpress
 Image ID: 6e880d17852f
 Tags:    [docker.io/library/wordpress:latest]
@@ -51,10 +49,10 @@ Image Layers
 ├──  ID: 834f4497afda Size: 7.168kB
 ├──  ID: bfe2ce1263f8 Size: 40.06MB
 └──  ID: 748e99b214cf Size: 11.78kB Top Layer of: [docker.io/library/wordpress:latest]
+```
 
-$ podman pull docker.io/circleci/ruby:latest
-$ podman pull docker.io/library/ruby:latest
-
+Show all child images and layers of the specified image:
+```
 $ podman image tree ae96a4ad4f3f --whatrequires
 Image ID: ae96a4ad4f3f
 Tags:    [docker.io/library/ruby:latest]
@@ -82,7 +80,7 @@ Image Layers
 
 
 ## SEE ALSO
-podman(1)
+**[podman(1)](podman.1.md)**
 
 ## HISTORY
 Feb 2019, Originally compiled by Kunal Kushwaha `<kushwaha_kunal_v7@lab.ntt.co.jp>`

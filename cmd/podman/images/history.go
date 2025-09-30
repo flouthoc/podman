@@ -1,20 +1,17 @@
 package images
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
-	"unicode"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -69,16 +66,16 @@ func historyFlags(cmd *cobra.Command) {
 
 	formatFlagName := "format"
 	flags.StringVar(&opts.format, formatFlagName, "", "Change the output to JSON or a Go template")
-	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(entities.ImageHistoryLayer{}))
+	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&historyReporter{}))
 
 	flags.BoolVarP(&opts.human, "human", "H", true, "Display sizes and dates in human readable format")
 	flags.BoolVar(&opts.noTrunc, "no-trunc", false, "Do not truncate the output")
-	flags.BoolVar(&opts.noTrunc, "notruncate", false, "Do not truncate the output")
 	flags.BoolVarP(&opts.quiet, "quiet", "q", false, "Display the numeric IDs only")
+	flags.SetNormalizeFunc(utils.AliasFlags)
 }
 
 func history(cmd *cobra.Command, args []string) error {
-	results, err := registry.ImageEngine().History(context.Background(), args[0], entities.ImageHistoryOptions{})
+	results, err := registry.ImageEngine().History(registry.Context(), args[0], entities.ImageHistoryOptions{})
 	if err != nil {
 		return err
 	}
@@ -110,37 +107,32 @@ func history(cmd *cobra.Command, args []string) error {
 		hr = append(hr, historyReporter{l})
 	}
 
-	hdrs := report.Headers(historyReporter{}, map[string]string{
-		"CreatedBy": "CREATED BY",
-	})
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
 
-	// Defaults
-	row := "{{.ID}}\t{{.Created}}\t{{.CreatedBy}}\t{{.Size}}\t{{.Comment}}\n"
 	switch {
-	case cmd.Flags().Changed("format"):
-		row = report.NormalizeFormat(opts.format)
 	case opts.quiet:
-		row = "{{.ID}}\n"
+		rpt, err = rpt.Parse(report.OriginUser, "{{range .}}{{.ID}}\n{{end -}}")
+	case cmd.Flags().Changed("format"):
+		rpt, err = rpt.Parse(report.OriginUser, cmd.Flag("format").Value.String())
+	default:
+		format := "{{range .}}{{.ID}}\t{{.Created}}\t{{.CreatedBy}}\t{{.Size}}\t{{.Comment}}\n{{end -}}"
+		rpt, err = rpt.Parse(report.OriginPodman, format)
 	}
-	format := report.EnforceRange(row)
-
-	tmpl, err := report.NewTemplate("history").Parse(format)
 	if err != nil {
 		return err
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
+	if rpt.RenderHeaders {
+		hdrs := report.Headers(historyReporter{}, map[string]string{
+			"CreatedBy": "CREATED BY",
+		})
 
-	if !opts.quiet && !cmd.Flags().Changed("format") {
-		if err := tmpl.Execute(w, hdrs); err != nil {
-			return errors.Wrapf(err, "failed to write report column headers")
+		if err := rpt.Execute(hdrs); err != nil {
+			return fmt.Errorf("failed to write report column headers: %w", err)
 		}
 	}
-	return tmpl.Execute(w, hr)
+	return rpt.Execute(hr)
 }
 
 type historyReporter struct {
@@ -155,9 +147,7 @@ func (h historyReporter) Created() string {
 }
 
 func (h historyReporter) Size() string {
-	s := units.HumanSizeWithPrecision(float64(h.ImageHistoryLayer.Size), 3)
-	i := strings.LastIndexFunc(s, unicode.IsNumber)
-	return s[:i+1] + " " + s[i+1:]
+	return units.HumanSizeWithPrecision(float64(h.ImageHistoryLayer.Size), 3)
 }
 
 func (h historyReporter) CreatedBy() string {
@@ -172,4 +162,12 @@ func (h historyReporter) ID() string {
 		return h.ImageHistoryLayer.ID[0:12]
 	}
 	return h.ImageHistoryLayer.ID
+}
+
+func (h historyReporter) CreatedAt() string {
+	return time.Unix(h.ImageHistoryLayer.Created.Unix(), 0).Format(time.RFC3339)
+}
+
+func (h historyReporter) CreatedSince() string {
+	return h.Created()
 }

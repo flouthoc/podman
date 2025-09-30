@@ -1,10 +1,12 @@
 package containers
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"errors"
+
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
@@ -44,10 +46,11 @@ func init() {
 
 func rename(cmd *cobra.Command, args []string) error {
 	if len(args) > 2 {
-		return errors.Errorf("must provide at least two arguments to rename")
+		return errors.New("must provide at least two arguments to rename")
 	}
+	args = utils.RemoveSlash(args)
 	renameOpts := entities.ContainerRenameOptions{
 		NewName: args[1],
 	}
-	return registry.ContainerEngine().ContainerRename(registry.GetContext(), args[0], renameOpts)
+	return registry.ContainerEngine().ContainerRename(registry.Context(), args[0], renameOpts)
 }

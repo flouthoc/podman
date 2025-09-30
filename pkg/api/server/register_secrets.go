@@ -1,10 +1,12 @@
+//go:build !remote
+
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/api/handlers/compat"
-	"github.com/containers/podman/v3/pkg/api/handlers/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers/compat"
+	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
 )
 
@@ -25,6 +27,14 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//     type: string
 	//     description: Secret driver
 	//     default: "file"
+	//   - in: query
+	//     name: driveropts
+	//     type: string
+	//     description: Secret driver options
+	//   - in: query
+	//     name: labels
+	//     type: string
+	//     description: Labels on the secret
 	//   - in: body
 	//     name: request
 	//     description: Secret
@@ -36,7 +46,7 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '201':
 	//     $ref: "#/responses/SecretCreateResponse"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/secrets/create"), s.APIHandler(libpod.CreateSecret)).Methods(http.MethodPost)
 	// swagger:operation GET /libpod/secrets/json libpod SecretListLibpod
 	// ---
@@ -44,14 +54,21 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//  - secrets
 	// summary: List secrets
 	// description: Returns a list of secrets
+	// parameters:
+	//  - in: query
+	//    name: filters
+	//    type: string
+	//    description: |
+	//      JSON encoded value of the filters (a `map[string][]string`) to process on the secrets list. Currently available filters:
+	//        - `name=[name]` Matches secrets name (accepts regex).
+	//        - `id=[id]` Matches for full or partial ID.
 	// produces:
 	// - application/json
-	// parameters:
 	// responses:
 	//   '200':
 	//     "$ref": "#/responses/SecretListResponse"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/secrets/json"), s.APIHandler(compat.ListSecrets)).Methods(http.MethodGet)
 	// swagger:operation GET /libpod/secrets/{name}/json libpod SecretInspectLibpod
 	// ---
@@ -64,6 +81,11 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//    type: string
 	//    required: true
 	//    description: the name or ID of the secret
+	//  - in: query
+	//    name: showsecret
+	//    type: boolean
+	//    description: Display Secret
+	//    default: false
 	// produces:
 	// - application/json
 	// responses:
@@ -72,8 +94,29 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '404':
 	//     "$ref": "#/responses/NoSuchSecret"
 	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/secrets/{name}/json"), s.APIHandler(compat.InspectSecret)).Methods(http.MethodGet)
+	// swagger:operation GET /libpod/secrets/{name}/exists libpod SecretExistsLibpod
+	// ---
+	// tags:
+	//  - secrets
+	// summary: Secret exists
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or ID of the secret
+	// produces:
+	// - application/json
+	// responses:
+	//   204:
+	//     description: secret exists
+	//   404:
+	//     $ref: '#/responses/NoSuchSecret'
+	//   '500':
+	//     "$ref": "#/responses/internalError"
+	r.Handle(VersionedPath("/libpod/secrets/{name}/exists"), s.APIHandler(libpod.SecretExists)).Methods(http.MethodGet)
 	// swagger:operation DELETE /libpod/secrets/{name} libpod SecretDeleteLibpod
 	// ---
 	// tags:
@@ -98,7 +141,7 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '404':
 	//     "$ref": "#/responses/NoSuchSecret"
 	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/secrets/{name}"), s.APIHandler(compat.RemoveSecret)).Methods(http.MethodDelete)
 
 	/*
@@ -110,14 +153,21 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//  - secrets (compat)
 	// summary: List secrets
 	// description: Returns a list of secrets
+	// parameters:
+	//  - in: query
+	//    name: filters
+	//    type: string
+	//    description: |
+	//      JSON encoded value of the filters (a `map[string][]string`) to process on the secrets list. Currently available filters:
+	//        - `name=[name]` Matches secrets name (accepts regex).
+	//        - `id=[id]` Matches for full or partial ID.
 	// produces:
 	// - application/json
-	// parameters:
 	// responses:
 	//   '200':
 	//     "$ref": "#/responses/SecretListCompatResponse"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/secrets"), s.APIHandler(compat.ListSecrets)).Methods(http.MethodGet)
 	r.Handle("/secrets", s.APIHandler(compat.ListSecrets)).Methods(http.MethodGet)
 	// swagger:operation POST /secrets/create compat SecretCreate
@@ -140,7 +190,7 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '409':
 	//     "$ref": "#/responses/SecretInUse"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/secrets/create"), s.APIHandler(compat.CreateSecret)).Methods(http.MethodPost)
 	r.Handle("/secrets/create", s.APIHandler(compat.CreateSecret)).Methods(http.MethodPost)
 	// swagger:operation GET /secrets/{name} compat SecretInspect
@@ -162,7 +212,7 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '404':
 	//     "$ref": "#/responses/NoSuchSecret"
 	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/secrets/{name}"), s.APIHandler(compat.InspectSecret)).Methods(http.MethodGet)
 	r.Handle("/secrets/{name}", s.APIHandler(compat.InspectSecret)).Methods(http.MethodGet)
 	// swagger:operation DELETE /secrets/{name} compat SecretDelete
@@ -184,7 +234,7 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '404':
 	//     "$ref": "#/responses/NoSuchSecret"
 	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/secrets/{name}"), s.APIHandler(compat.RemoveSecret)).Methods(http.MethodDelete)
 	r.Handle("/secret/{name}", s.APIHandler(compat.RemoveSecret)).Methods(http.MethodDelete)
 

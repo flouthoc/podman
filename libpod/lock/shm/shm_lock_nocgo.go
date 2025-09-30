@@ -1,4 +1,4 @@
-// +build linux,!cgo
+//go:build linux && !cgo
 
 package shm
 
@@ -16,7 +16,7 @@ type SHMLocks struct {
 // numLocks must not be 0, and may be rounded up to a multiple of the bitmap
 // size used by the underlying implementation.
 func CreateSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return &SHMLocks{}, nil
 }
 
@@ -24,13 +24,13 @@ func CreateSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
 // POSIX semaphores. numLocks must match the number of locks the shared memory
 // segment was created with.
 func OpenSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return &SHMLocks{}, nil
 }
 
 // GetMaxLocks returns the maximum number of locks in the SHM
 func (locks *SHMLocks) GetMaxLocks() uint32 {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return 0
 }
 
@@ -40,7 +40,7 @@ func (locks *SHMLocks) GetMaxLocks() uint32 {
 // fail to release, causing a program freeze.
 // Close() is only intended to be used while testing the locks.
 func (locks *SHMLocks) Close() error {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return nil
 }
 
@@ -50,7 +50,7 @@ func (locks *SHMLocks) Close() error {
 // Allocations past the maximum number of locks given when the SHM segment was
 // created will result in an error, and no semaphore will be allocated.
 func (locks *SHMLocks) AllocateSemaphore() (uint32, error) {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return 0, nil
 }
 
@@ -59,7 +59,7 @@ func (locks *SHMLocks) AllocateSemaphore() (uint32, error) {
 // If the semaphore is already in use or the index is invalid an error will be
 // returned.
 func (locks *SHMLocks) AllocateGivenSemaphore(sem uint32) error {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return nil
 }
 
@@ -67,14 +67,14 @@ func (locks *SHMLocks) AllocateGivenSemaphore(sem uint32) error {
 // reallocated to another container or pod.
 // The given semaphore must be already allocated, or an error will be returned.
 func (locks *SHMLocks) DeallocateSemaphore(sem uint32) error {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return nil
 }
 
 // DeallocateAllSemaphores frees all semaphores so they can be reallocated to
 // other containers and pods.
 func (locks *SHMLocks) DeallocateAllSemaphores() error {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return nil
 }
 
@@ -86,7 +86,7 @@ func (locks *SHMLocks) DeallocateAllSemaphores() error {
 // but before the caller has queried the database to determine this, will
 // succeed.
 func (locks *SHMLocks) LockSemaphore(sem uint32) error {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return nil
 }
 
@@ -97,6 +97,18 @@ func (locks *SHMLocks) LockSemaphore(sem uint32) error {
 // but before the caller has queried the database to determine this, will
 // succeed.
 func (locks *SHMLocks) UnlockSemaphore(sem uint32) error {
-	logrus.Error("locks are not supported without cgo")
+	logrus.Error("Locks are not supported without cgo")
 	return nil
+}
+
+// GetFreeLocks gets the number of locks available to be allocated.
+func (locks *SHMLocks) GetFreeLocks() (uint32, error) {
+	logrus.Error("Locks are not supported without cgo")
+	return 0, nil
+}
+
+// Get a list of locks that are currently taken.
+func (locks *SHMLocks) GetTakenLocks() ([]uint32, error) {
+	logrus.Error("Locks are not supported without cgo")
+	return nil, nil
 }

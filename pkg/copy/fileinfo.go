@@ -3,13 +3,14 @@ package copy
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod/define"
 )
 
 // XDockerContainerPathStatHeader is the *key* in http headers pointing to the
@@ -18,7 +19,7 @@ const XDockerContainerPathStatHeader = "X-Docker-Container-Path-Stat"
 
 // ErrENOENT mimics the stdlib's ErrENOENT and can be used to implement custom logic
 // while preserving the user-visible error message.
-var ErrENOENT = errors.New("No such file or directory")
+var ErrENOENT = errors.New("no such file or directory")
 
 // FileInfo describes a file or directory and is returned by
 // (*CopyItem).Stat().
@@ -29,7 +30,7 @@ type FileInfo = define.FileInfo
 func EncodeFileInfo(info *FileInfo) (string, error) {
 	buf, err := json.Marshal(&info)
 	if err != nil {
-		return "", errors.Wrap(err, "failed to serialize file stats")
+		return "", fmt.Errorf("failed to serialize file stats: %w", err)
 	}
 	return base64.URLEncoding.EncodeToString(buf), nil
 }
@@ -82,23 +83,28 @@ func ResolveHostPath(path string) (*FileInfo, error) {
 // is preserved.  The filepath API among tends to clean up a bit too much but
 // we *must* preserve this data by all means.
 func PreserveBasePath(original, resolved string) string {
-	// Handle "/"
-	if strings.HasSuffix(original, "/") {
-		if !strings.HasSuffix(resolved, "/") {
-			resolved += "/"
+	// Ensure paths are in platform semantics (replace / with \ on Windows)
+	resolved = filepath.FromSlash(resolved)
+	original = filepath.FromSlash(original)
+
+	if filepath.Base(resolved) != "." && filepath.Base(original) == "." {
+		if !hasTrailingPathSeparator(resolved) {
+			// Add a separator if it doesn't already end with one (a cleaned
+			// path would only end in a separator if it is the root).
+			resolved += string(filepath.Separator)
 		}
-		return resolved
+		resolved += "."
 	}
 
-	// Handle "/."
-	if strings.HasSuffix(original, "/.") {
-		if strings.HasSuffix(resolved, "/") { // could be root!
-			resolved += "."
-		} else if !strings.HasSuffix(resolved, "/.") {
-			resolved += "/."
-		}
-		return resolved
+	if !hasTrailingPathSeparator(resolved) && hasTrailingPathSeparator(original) {
+		resolved += string(filepath.Separator)
 	}
 
 	return resolved
+}
+
+// hasTrailingPathSeparator returns whether the given
+// path ends with the system's path separator character.
+func hasTrailingPathSeparator(path string) bool {
+	return len(path) > 0 && os.IsPathSeparator(path[len(path)-1])
 }

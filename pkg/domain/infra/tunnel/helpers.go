@@ -2,43 +2,56 @@ package tunnel
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/bindings/containers"
-	"github.com/containers/podman/v3/pkg/bindings/pods"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/errorhandling"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/bindings/containers"
+	"github.com/containers/podman/v5/pkg/bindings/pods"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 )
 
 // FIXME: the `ignore` parameter is very likely wrong here as it should rather
-//        be used on *errors* from operations such as remove.
-func getContainersByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string) ([]entities.ListContainer, error) {
-	ctrs, _, err := getContainersAndInputByContext(contextWithConnection, all, ignore, namesOrIDs)
+//
+//	be used on *errors* from operations such as remove.
+func getContainersByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string) ([]entities.ListContainer, error) { //nolint:unparam
+	ctrs, _, err := getContainersAndInputByContext(contextWithConnection, all, ignore, namesOrIDs, nil)
 	return ctrs, err
 }
 
-func getContainersAndInputByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string) ([]entities.ListContainer, []string, error) {
+func getContainersAndInputByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string, filters map[string][]string) ([]entities.ListContainer, []string, error) {
 	if all && len(namesOrIDs) > 0 {
-		return nil, nil, errors.New("cannot lookup containers and all")
+		return nil, nil, errors.New("cannot look up containers and all")
 	}
-	options := new(containers.ListOptions).WithAll(true).WithSync(true)
+	// short cut if not all, not filters and no names are given. This can happen with
+	// --ignore and --cidfile, https://github.com/containers/podman/issues/23554.
+	// In this case we have to do nothting and not even have to do a request
+	if !all && len(filters) == 0 && len(namesOrIDs) == 0 {
+		return nil, nil, nil
+	}
+
+	options := new(containers.ListOptions).WithAll(true).WithSync(true).WithFilters(filters)
 	allContainers, err := containers.List(contextWithConnection, options)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	rawInputs := []string{}
-	if all {
+
+	// If no names or IDs are specified, we can return the result as is.
+	// Otherwise, we need to do some further lookups.
+	if len(namesOrIDs) == 0 {
 		for i := range allContainers {
 			rawInputs = append(rawInputs, allContainers[i].ID)
 		}
-
 		return allContainers, rawInputs, err
 	}
 
-	// Note: it would be nicer if the lists endpoint would support that as
-	// we could use the libpod backend for looking up containers rather
-	// than risking diverging the local and remote lookups.
+	// Note: it would be nicer if the lists endpoint would support batch
+	// name/ID lookups as we could use the libpod backend for looking up
+	// containers rather than risking diverging the local and remote
+	// lookups.
 	//
 	// A `--filter nameOrId=abc` that can be specified multiple times would
 	// be awesome to have.
@@ -46,7 +59,7 @@ func getContainersAndInputByContext(contextWithConnection context.Context, all, 
 	for _, nameOrID := range namesOrIDs {
 		// First determine if the container exists by doing an inspect.
 		// Inspect takes supports names and IDs and let's us determine
-		// a containers full ID.
+		// a container's full ID.
 		inspectData, err := containers.Inspect(contextWithConnection, nameOrID, new(containers.InspectOptions).WithSize(false))
 		if err != nil {
 			if ignore && errorhandling.Contains(err, define.ErrNoSuchCtr) {
@@ -69,15 +82,15 @@ func getContainersAndInputByContext(contextWithConnection context.Context, all, 
 		}
 
 		if !found && !ignore {
-			return nil, nil, errors.Wrapf(define.ErrNoSuchCtr, "unable to find container %q", nameOrID)
+			return nil, nil, fmt.Errorf("unable to find container %q: %w", nameOrID, define.ErrNoSuchCtr)
 		}
 	}
 	return filtered, rawInputs, nil
 }
 
-func getPodsByContext(contextWithConnection context.Context, all bool, namesOrIDs []string) ([]*entities.ListPodsReport, error) {
+func getPodsByContext(contextWithConnection context.Context, all bool, ignore bool, namesOrIDs []string) ([]*entities.ListPodsReport, error) {
 	if all && len(namesOrIDs) > 0 {
-		return nil, errors.New("cannot lookup specific pods and all")
+		return nil, errors.New("cannot look up specific pods and all")
 	}
 
 	allPods, err := pods.List(contextWithConnection, nil)
@@ -98,11 +111,14 @@ func getPodsByContext(contextWithConnection context.Context, all bool, namesOrID
 	for _, nameOrID := range namesOrIDs {
 		// First determine if the pod exists by doing an inspect.
 		// Inspect takes supports names and IDs and let's us determine
-		// a containers full ID.
+		// a container's full ID.
 		inspectData, err := pods.Inspect(contextWithConnection, nameOrID, nil)
 		if err != nil {
 			if errorhandling.Contains(err, define.ErrNoSuchPod) {
-				return nil, errors.Wrapf(define.ErrNoSuchPod, "unable to find pod %q", nameOrID)
+				if ignore {
+					continue
+				}
+				return nil, fmt.Errorf("unable to find pod %q: %w", nameOrID, define.ErrNoSuchPod)
 			}
 			return nil, err
 		}
@@ -120,7 +136,10 @@ func getPodsByContext(contextWithConnection context.Context, all bool, namesOrID
 		}
 
 		if !found {
-			return nil, errors.Wrapf(define.ErrNoSuchPod, "unable to find pod %q", nameOrID)
+			if ignore {
+				continue
+			}
+			return nil, fmt.Errorf("unable to find pod %q: %w", nameOrID, define.ErrNoSuchPod)
 		}
 	}
 	return filtered, nil

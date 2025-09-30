@@ -2,18 +2,17 @@ package containers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/utils"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -41,9 +40,8 @@ var (
 )
 
 var (
-	waitOptions   = entities.WaitOptions{}
-	waitCondition string
-	waitInterval  string
+	waitOptions  = entities.WaitOptions{}
+	waitInterval string
 )
 
 func waitFlags(cmd *cobra.Command) {
@@ -53,9 +51,14 @@ func waitFlags(cmd *cobra.Command) {
 	flags.StringVarP(&waitInterval, intervalFlagName, "i", "250ms", "Time Interval to wait before polling for completion")
 	_ = cmd.RegisterFlagCompletionFunc(intervalFlagName, completion.AutocompleteNone)
 
+	flags.BoolVarP(&waitOptions.Ignore, "ignore", "", false, "Ignore if a container does not exist")
+
 	conditionFlagName := "condition"
-	flags.StringVar(&waitCondition, conditionFlagName, "stopped", "Condition to wait on")
+	flags.StringSliceVar(&waitOptions.Conditions, conditionFlagName, []string{}, "Condition to wait on")
 	_ = cmd.RegisterFlagCompletionFunc(conditionFlagName, common.AutocompleteWaitCondition)
+
+	waitExitFirst := "exit-first-match"
+	flags.BoolVar(&waitOptions.ExitFirstMatch, waitExitFirst, false, "Wait for exit of first container which matches conditions, ignore other ones")
 }
 
 func init() {
@@ -78,6 +81,7 @@ func wait(cmd *cobra.Command, args []string) error {
 		err  error
 		errs utils.OutputErrors
 	)
+	args = utils.RemoveSlash(args)
 	if waitOptions.Interval, err = time.ParseDuration(waitInterval); err != nil {
 		var err1 error
 		if waitOptions.Interval, err1 = time.ParseDuration(waitInterval + "ms"); err1 != nil {
@@ -86,17 +90,11 @@ func wait(cmd *cobra.Command, args []string) error {
 	}
 
 	if !waitOptions.Latest && len(args) == 0 {
-		return errors.Errorf("%q requires a name, id, or the \"--latest\" flag", cmd.CommandPath())
+		return fmt.Errorf("%q requires a name, id, or the \"--latest\" flag", cmd.CommandPath())
 	}
 	if waitOptions.Latest && len(args) > 0 {
 		return errors.New("--latest and containers cannot be used together")
 	}
-
-	cond, err := define.StringToContainerStatus(waitCondition)
-	if err != nil {
-		return err
-	}
-	waitOptions.Condition = []define.ContainerStatus{cond}
 
 	responses, err := registry.ContainerEngine().ContainerWait(context.Background(), args, waitOptions)
 	if err != nil {

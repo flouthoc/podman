@@ -1,10 +1,8 @@
 package utils_test
 
 import (
-	"os"
-
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -17,16 +15,6 @@ var _ = Describe("PodmanTest test", func() {
 
 	AfterEach(func() {
 		FakeOutputs = make(map[string][]string)
-	})
-
-	It("Test PodmanAsUserBase", func() {
-		FakeOutputs["check"] = []string{"check"}
-		os.Setenv("HOOK_OPTION", "hook_option")
-		env := os.Environ()
-		session := podmanTest.PodmanAsUserBase([]string{"check"}, 1000, 1000, "", env, true, false, nil)
-		os.Unsetenv("HOOK_OPTION")
-		session.WaitWithDefaultTimeout()
-		Expect(session.Command.Process).ShouldNot(BeNil())
 	})
 
 	It("Test NumberOfContainersRunning", func() {

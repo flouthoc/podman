@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
 
-# Need to run linter twice to cover all the build tags code paths
+# Run golangci-lint with different sets of build tags.
 set -e
 
-declare -A BUILD_TAGS
-# TODO: add systemd tag
-BUILD_TAGS[default]="apparmor,seccomp,selinux,linter"
-BUILD_TAGS[abi]="${BUILD_TAGS[default]},!remoteclient"
-BUILD_TAGS[tunnel]="${BUILD_TAGS[default]},remote,remoteclient"
+# WARNING: This script executes on multiple operating systems that
+# do not have the same version of Bash.  Specifically, Darwin uses
+# a very old version, where modern features (like `declare -A`) are
+# absent.
 
-declare -A SKIP_DIRS
-SKIP_DIRS[abi]=""
-# TODO: add "remote" build tag to pkg/api
-SKIP_DIRS[tunnel]="pkg/api"
+declare -a EXTRA_TAGS
 
-[[ $1 == run ]] && shift
+echo "Linting for GOOS=$GOOS"
+case "$GOOS" in
+  windows|darwin)
+    # For Darwin and Windows, only "remote" linting is possible and required.
+    TAGS="remote,containers_image_openpgp"
+    ;;
+  freebsd)
+    TAGS="containers_image_openpgp"
+    EXTRA_TAGS=(",remote")
+    ;;
+  *)
+    # Assume Linux: run linter for various sets of build tags.
+    TAGS="apparmor,seccomp,selinux"
+    EXTRA_TAGS=(",systemd" ",remote")
+esac
 
-for i in tunnel abi; do
-  echo ""
-  echo Running golangci-lint for "$i"
-  echo Build Tags          "$i": ${BUILD_TAGS[$i]}
-  echo Skipped directories "$i": ${SKIP_DIRS[$i]}
-  ./bin/golangci-lint run --build-tags=${BUILD_TAGS[$i]} --skip-dirs=${SKIP_DIRS[$i]} "$@"
+for EXTRA in "" "${EXTRA_TAGS[@]}"; do
+  # Use set -x in a subshell to make it easy for a developer to copy-paste
+  # the command-line to focus or debug a single, specific linting category.
+  (
+    set -x
+    ./bin/golangci-lint run --build-tags="${TAGS}${EXTRA}" "$@"
+  )
 done

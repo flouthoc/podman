@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/ghodss/yaml"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/libpod/define"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"sigs.k8s.io/yaml"
 )
 
 var (
@@ -45,6 +45,11 @@ var (
 	debug    bool
 )
 
+type infoReport struct {
+	define.Info
+	Client *define.Version `json:",omitempty" yaml:",omitempty"`
+}
+
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
 		Command: infoCommand,
@@ -62,35 +67,50 @@ func infoFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 
 	flags.BoolVarP(&debug, "debug", "D", false, "Display additional debug information")
+	_ = flags.MarkHidden("debug") // It's a NOP since Podman version 2.0
 
 	formatFlagName := "format"
 	flags.StringVarP(&inFormat, formatFlagName, "f", "", "Change the output format to JSON or a Go template")
-	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(define.Info{Host: &define.HostInfo{}, Store: &define.StoreInfo{}}))
+	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&define.Info{}))
 }
 
 func info(cmd *cobra.Command, args []string) error {
-	info, err := registry.ContainerEngine().Info(registry.GetContext())
+	info, err := registry.ContainerEngine().Info(registry.Context())
 	if err != nil {
 		return err
 	}
+	remote := registry.IsRemote()
+	info.Host.ServiceIsRemote = remote
 
-	info.Host.ServiceIsRemote = registry.IsRemote()
+	infoReport := infoReport{
+		Info: *info,
+	}
+
+	if remote {
+		clientVers, _ := define.GetVersion()
+		infoReport.Client = &clientVers
+	}
 
 	switch {
 	case report.IsJSON(inFormat):
-		b, err := json.MarshalIndent(info, "", "  ")
+		b, err := json.MarshalIndent(infoReport, "", "  ")
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(b))
 	case cmd.Flags().Changed("format"):
-		tmpl, err := report.NewTemplate("info").Parse(inFormat)
+		rpt := report.New(os.Stdout, cmd.Name())
+		defer rpt.Flush()
+
+		// Use OriginUnknown so it does not add an extra range since it
+		// will only be called for a single element and not a slice.
+		rpt, err = rpt.Parse(report.OriginUnknown, inFormat)
 		if err != nil {
 			return err
 		}
-		return tmpl.Execute(os.Stdout, info)
+		return rpt.Execute(infoReport)
 	default:
-		b, err := yaml.Marshal(info)
+		b, err := yaml.Marshal(infoReport)
 		if err != nil {
 			return err
 		}

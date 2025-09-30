@@ -6,34 +6,33 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/containers/podman/v3/pkg/api/handlers"
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/specgen"
+	"github.com/containers/podman/v5/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/bindings"
+	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 	jsoniter "github.com/json-iterator/go"
 )
 
-func CreatePodFromSpec(ctx context.Context, s *specgen.PodSpecGenerator, options *CreateOptions) (*entities.PodCreateReport, error) {
-	var (
-		pcr entities.PodCreateReport
-	)
-	if options == nil {
-		options = new(CreateOptions)
+func CreatePodFromSpec(ctx context.Context, spec *entitiesTypes.PodSpec) (*entitiesTypes.PodCreateReport, error) {
+	var pcr entitiesTypes.PodCreateReport
+	if spec == nil {
+		spec = new(entitiesTypes.PodSpec)
 	}
-	_ = options
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	specgenString, err := jsoniter.MarshalToString(s)
+	specString, err := jsoniter.MarshalToString(spec.PodSpecGen)
 	if err != nil {
 		return nil, err
 	}
-	stringReader := strings.NewReader(specgenString)
-	response, err := conn.DoRequest(stringReader, http.MethodPost, "/pods/create", nil, nil)
+	stringReader := strings.NewReader(specString)
+	response, err := conn.DoRequest(ctx, stringReader, http.MethodPost, "/pods/create", nil, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	return &pcr, response.Process(&pcr)
 }
 
@@ -43,18 +42,18 @@ func Exists(ctx context.Context, nameOrID string, options *ExistsOptions) (bool,
 	if err != nil {
 		return false, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodGet, "/pods/%s/exists", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/pods/%s/exists", nil, nil, nameOrID)
 	if err != nil {
 		return false, err
 	}
+	defer response.Body.Close()
+
 	return response.IsSuccess(), nil
 }
 
 // Inspect returns low-level information about the given pod.
-func Inspect(ctx context.Context, nameOrID string, options *InspectOptions) (*entities.PodInspectReport, error) {
-	var (
-		report entities.PodInspectReport
-	)
+func Inspect(ctx context.Context, nameOrID string, options *InspectOptions) (*entitiesTypes.PodInspectReport, error) {
+	var report entitiesTypes.PodInspectReport
 	if options == nil {
 		options = new(InspectOptions)
 	}
@@ -63,19 +62,19 @@ func Inspect(ctx context.Context, nameOrID string, options *InspectOptions) (*en
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodGet, "/pods/%s/json", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/pods/%s/json", nil, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	return &report, response.Process(&report)
 }
 
 // Kill sends a SIGTERM to all the containers in a pod.  The optional signal parameter
 // can be used to override  SIGTERM.
-func Kill(ctx context.Context, nameOrID string, options *KillOptions) (*entities.PodKillReport, error) {
-	var (
-		report entities.PodKillReport
-	)
+func Kill(ctx context.Context, nameOrID string, options *KillOptions) (*entitiesTypes.PodKillReport, error) {
+	var report entitiesTypes.PodKillReport
 	if options == nil {
 		options = new(KillOptions)
 	}
@@ -87,16 +86,18 @@ func Kill(ctx context.Context, nameOrID string, options *KillOptions) (*entities
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/%s/kill", params, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/%s/kill", params, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
-	return &report, response.Process(&report)
+	defer response.Body.Close()
+
+	return &report, response.ProcessWithError(&report, &errorhandling.PodConflictErrorModel{})
 }
 
 // Pause pauses all running containers in a given pod.
-func Pause(ctx context.Context, nameOrID string, options *PauseOptions) (*entities.PodPauseReport, error) {
-	var report entities.PodPauseReport
+func Pause(ctx context.Context, nameOrID string, options *PauseOptions) (*entitiesTypes.PodPauseReport, error) {
+	var report entitiesTypes.PodPauseReport
 	if options == nil {
 		options = new(PauseOptions)
 	}
@@ -105,17 +106,19 @@ func Pause(ctx context.Context, nameOrID string, options *PauseOptions) (*entiti
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/%s/pause", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/%s/pause", nil, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
-	return &report, response.Process(&report)
+	defer response.Body.Close()
+
+	return &report, response.ProcessWithError(&report, &errorhandling.PodConflictErrorModel{})
 }
 
 // Prune by default removes all non-running pods in local storage.
 // And with force set true removes all pods.
-func Prune(ctx context.Context, options *PruneOptions) ([]*entities.PodPruneReport, error) {
-	var reports []*entities.PodPruneReport
+func Prune(ctx context.Context, options *PruneOptions) ([]*entitiesTypes.PodPruneReport, error) {
+	var reports []*entitiesTypes.PodPruneReport
 	if options == nil {
 		options = new(PruneOptions)
 	}
@@ -124,19 +127,19 @@ func Prune(ctx context.Context, options *PruneOptions) ([]*entities.PodPruneRepo
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/prune", nil, nil)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/prune", nil, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	return reports, response.Process(&reports)
 }
 
 // List returns all pods in local storage.  The optional filters parameter can
 // be used to refine which pods should be listed.
-func List(ctx context.Context, options *ListOptions) ([]*entities.ListPodsReport, error) {
-	var (
-		podsReports []*entities.ListPodsReport
-	)
+func List(ctx context.Context, options *ListOptions) ([]*entitiesTypes.ListPodsReport, error) {
+	var podsReports []*entitiesTypes.ListPodsReport
 	if options == nil {
 		options = new(ListOptions)
 	}
@@ -148,16 +151,18 @@ func List(ctx context.Context, options *ListOptions) ([]*entities.ListPodsReport
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodGet, "/pods/json", params, nil)
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/pods/json", params, nil)
 	if err != nil {
 		return podsReports, err
 	}
+	defer response.Body.Close()
+
 	return podsReports, response.Process(&podsReports)
 }
 
 // Restart restarts all containers in a pod.
-func Restart(ctx context.Context, nameOrID string, options *RestartOptions) (*entities.PodRestartReport, error) {
-	var report entities.PodRestartReport
+func Restart(ctx context.Context, nameOrID string, options *RestartOptions) (*entitiesTypes.PodRestartReport, error) {
+	var report entitiesTypes.PodRestartReport
 	if options == nil {
 		options = new(RestartOptions)
 	}
@@ -166,17 +171,19 @@ func Restart(ctx context.Context, nameOrID string, options *RestartOptions) (*en
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/%s/restart", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/%s/restart", nil, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
-	return &report, response.Process(&report)
+	defer response.Body.Close()
+
+	return &report, response.ProcessWithError(&report, &errorhandling.PodConflictErrorModel{})
 }
 
-// Remove deletes a Pod from from local storage. The optional force parameter denotes
+// Remove deletes a Pod from local storage. The optional force parameter denotes
 // that the Pod can be removed even if in a running state.
-func Remove(ctx context.Context, nameOrID string, options *RemoveOptions) (*entities.PodRmReport, error) {
-	var report entities.PodRmReport
+func Remove(ctx context.Context, nameOrID string, options *RemoveOptions) (*entitiesTypes.PodRmReport, error) {
+	var report entitiesTypes.PodRmReport
 	if options == nil {
 		options = new(RemoveOptions)
 	}
@@ -188,16 +195,18 @@ func Remove(ctx context.Context, nameOrID string, options *RemoveOptions) (*enti
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodDelete, "/pods/%s", params, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodDelete, "/pods/%s", params, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	return &report, response.Process(&report)
 }
 
 // Start starts all containers in a pod.
-func Start(ctx context.Context, nameOrID string, options *StartOptions) (*entities.PodStartReport, error) {
-	var report entities.PodStartReport
+func Start(ctx context.Context, nameOrID string, options *StartOptions) (*entitiesTypes.PodStartReport, error) {
+	var report entitiesTypes.PodStartReport
 	if options == nil {
 		options = new(StartOptions)
 	}
@@ -206,21 +215,25 @@ func Start(ctx context.Context, nameOrID string, options *StartOptions) (*entiti
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/%s/start", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/%s/start", nil, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	if response.StatusCode == http.StatusNotModified {
 		report.Id = nameOrID
+		report.RawInput = nameOrID
 		return &report, nil
 	}
-	return &report, response.Process(&report)
+
+	return &report, response.ProcessWithError(&report, &errorhandling.PodConflictErrorModel{})
 }
 
 // Stop stops all containers in a Pod. The optional timeout parameter can be
 // used to override the timeout before the container is killed.
-func Stop(ctx context.Context, nameOrID string, options *StopOptions) (*entities.PodStopReport, error) {
-	var report entities.PodStopReport
+func Stop(ctx context.Context, nameOrID string, options *StopOptions) (*entitiesTypes.PodStopReport, error) {
+	var report entitiesTypes.PodStopReport
 	if options == nil {
 		options = new(StopOptions)
 	}
@@ -232,15 +245,17 @@ func Stop(ctx context.Context, nameOrID string, options *StopOptions) (*entities
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/%s/stop", params, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/%s/stop", params, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	if response.StatusCode == http.StatusNotModified {
 		report.Id = nameOrID
 		return &report, nil
 	}
-	return &report, response.Process(&report)
+	return &report, response.ProcessWithError(&report, &errorhandling.PodConflictErrorModel{})
 }
 
 // Top gathers statistics about the running processes in a pod. The nameOrID can be a pod name
@@ -257,10 +272,11 @@ func Top(ctx context.Context, nameOrID string, options *TopOptions) ([]string, e
 	if descriptors := options.GetDescriptors(); len(descriptors) > 0 {
 		params.Set("ps_args", strings.Join(descriptors, ","))
 	}
-	response, err := conn.DoRequest(nil, http.MethodGet, "/pods/%s/top", params, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/pods/%s/top", params, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
 
 	body := handlers.PodTopOKBody{}
 	if err = response.Process(&body); err != nil {
@@ -279,25 +295,27 @@ func Top(ctx context.Context, nameOrID string, options *TopOptions) ([]string, e
 }
 
 // Unpause unpauses all paused containers in a Pod.
-func Unpause(ctx context.Context, nameOrID string, options *UnpauseOptions) (*entities.PodUnpauseReport, error) {
+func Unpause(ctx context.Context, nameOrID string, options *UnpauseOptions) (*entitiesTypes.PodUnpauseReport, error) {
 	if options == nil {
 		options = new(UnpauseOptions)
 	}
 	_ = options
-	var report entities.PodUnpauseReport
+	var report entitiesTypes.PodUnpauseReport
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodPost, "/pods/%s/unpause", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/pods/%s/unpause", nil, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
-	return &report, response.Process(&report)
+	defer response.Body.Close()
+
+	return &report, response.ProcessWithError(&report, &errorhandling.PodConflictErrorModel{})
 }
 
 // Stats display resource-usage statistics of one or more pods.
-func Stats(ctx context.Context, namesOrIDs []string, options *StatsOptions) ([]*entities.PodStatsReport, error) {
+func Stats(ctx context.Context, namesOrIDs []string, options *StatsOptions) ([]*entitiesTypes.PodStatsReport, error) {
 	if options == nil {
 		options = new(StatsOptions)
 	}
@@ -313,10 +331,12 @@ func Stats(ctx context.Context, namesOrIDs []string, options *StatsOptions) ([]*
 		params.Add("namesOrIDs", i)
 	}
 
-	var reports []*entities.PodStatsReport
-	response, err := conn.DoRequest(nil, http.MethodGet, "/pods/stats", params, nil)
+	var reports []*entitiesTypes.PodStatsReport
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/pods/stats", params, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	return reports, response.Process(&reports)
 }

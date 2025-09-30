@@ -6,10 +6,9 @@ package env
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
-
-	"github.com/pkg/errors"
 )
 
 const whiteSpaces = " \t"
@@ -17,15 +16,15 @@ const whiteSpaces = " \t"
 // DefaultEnvVariables returns a default environment, with $PATH and $TERM set.
 func DefaultEnvVariables() map[string]string {
 	return map[string]string{
-		"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"TERM": "xterm",
+		"PATH":      "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"container": "podman",
 	}
 }
 
 // Slice transforms the specified map of environment variables into a
 // slice. If a value is non-empty, the key and value are joined with '='.
 func Slice(m map[string]string) []string {
-	env := make([]string, len(m))
+	env := make([]string, 0, len(m))
 	for k, v := range m {
 		var s string
 		if len(v) > 0 {
@@ -38,14 +37,24 @@ func Slice(m map[string]string) []string {
 	return env
 }
 
+// Map transforms the specified slice of environment variables into a
+// map.
+func Map(slice []string) map[string]string {
+	envmap := make(map[string]string, len(slice))
+	for _, line := range slice {
+		key, val, _ := strings.Cut(line, "=")
+		envmap[key] = val
+	}
+	return envmap
+}
+
 // Join joins the two environment maps with override overriding base.
 func Join(base map[string]string, override map[string]string) map[string]string {
 	if len(base) == 0 {
-		return override
+		return maps.Clone(override)
 	}
-	for k, v := range override {
-		base[k] = v
-	}
+	base = maps.Clone(base)
+	maps.Copy(base, override)
 	return base
 }
 
@@ -55,7 +64,7 @@ func ParseFile(path string) (_ map[string]string, err error) {
 	env := make(map[string]string)
 	defer func() {
 		if err != nil {
-			err = errors.Wrapf(err, "error parsing env file %q", path)
+			err = fmt.Errorf("parsing file %q: %w", path, err)
 		}
 	}()
 
@@ -80,30 +89,25 @@ func ParseFile(path string) (_ map[string]string, err error) {
 }
 
 func parseEnv(env map[string]string, line string) error {
-	data := strings.SplitN(line, "=", 2)
+	key, val, hasVal := strings.Cut(line, "=")
 
 	// catch invalid variables such as "=" or "=A"
-	if data[0] == "" {
-		return errors.Errorf("invalid environment variable: %q", line)
+	if key == "" {
+		return fmt.Errorf("invalid variable: %q", line)
 	}
 	// trim the front of a variable, but nothing else
-	name := strings.TrimLeft(data[0], whiteSpaces)
-	if strings.ContainsAny(name, whiteSpaces) {
-		return errors.Errorf("name %q has white spaces, poorly formatted name", name)
-	}
-
-	if len(data) > 1 {
-		env[name] = data[1]
+	name := strings.TrimLeft(key, whiteSpaces)
+	if hasVal {
+		env[name] = val
 	} else {
-		if strings.HasSuffix(name, "*") {
-			name = strings.TrimSuffix(name, "*")
+		if name, hasStar := strings.CutSuffix(name, "*"); hasStar {
 			for _, e := range os.Environ() {
-				part := strings.SplitN(e, "=", 2)
-				if len(part) < 2 {
+				envKey, envVal, hasEq := strings.Cut(e, "=")
+				if !hasEq {
 					continue
 				}
-				if strings.HasPrefix(part[0], name) {
-					env[part[0]] = part[1]
+				if strings.HasPrefix(envKey, name) {
+					env[envKey] = envVal
 				}
 			}
 		} else if val, ok := os.LookupEnv(name); ok {

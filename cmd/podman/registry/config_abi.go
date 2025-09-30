@@ -1,4 +1,4 @@
-// +build !remote
+//go:build !remote
 
 package registry
 

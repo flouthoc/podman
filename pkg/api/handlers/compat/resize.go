@@ -1,21 +1,24 @@
+//go:build !remote
+
 package compat
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
 	"github.com/gorilla/mux"
-	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
+	"go.podman.io/common/pkg/resize"
 )
 
 func ResizeTTY(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
-	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	decoder := utils.GetDecoder(r)
 
 	// /containers/{id}/resize
 	query := struct {
@@ -27,12 +30,11 @@ func ResizeTTY(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
-			errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
-	sz := define.TerminalSize{
+	sz := resize.TerminalSize{
 		Width:  query.Width,
 		Height: query.Height,
 	}
@@ -47,10 +49,10 @@ func ResizeTTY(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := ctnr.AttachResize(sz); err != nil {
-			if errors.Cause(err) != define.ErrCtrStateInvalid {
-				utils.InternalServerError(w, errors.Wrapf(err, "cannot resize container"))
+			if !errors.Is(err, define.ErrCtrStateInvalid) {
+				utils.InternalServerError(w, fmt.Errorf("cannot resize container: %w", err))
 			} else {
-				utils.Error(w, "Container not running", http.StatusConflict, err)
+				utils.Error(w, http.StatusConflict, err)
 			}
 			return
 		}
@@ -65,16 +67,15 @@ func ResizeTTY(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if state, err := ctnr.State(); err != nil {
-			utils.InternalServerError(w, errors.Wrapf(err, "cannot obtain session container state"))
+			utils.InternalServerError(w, fmt.Errorf("cannot obtain session container state: %w", err))
 			return
 		} else if state != define.ContainerStateRunning && !query.IgnoreNotRunning {
-			utils.Error(w, "Container not running", http.StatusConflict,
-				fmt.Errorf("container %q in wrong state %q", name, state.String()))
+			utils.Error(w, http.StatusConflict, fmt.Errorf("container %q in wrong state %q", name, state.String()))
 			return
 		}
 		if err := ctnr.ExecResize(name, sz); err != nil {
-			if errors.Cause(err) != define.ErrExecSessionStateInvalid || !query.IgnoreNotRunning {
-				utils.InternalServerError(w, errors.Wrapf(err, "cannot resize session"))
+			if !errors.Is(err, define.ErrExecSessionStateInvalid) || !query.IgnoreNotRunning {
+				utils.InternalServerError(w, fmt.Errorf("cannot resize session: %w", err))
 				return
 			}
 		}

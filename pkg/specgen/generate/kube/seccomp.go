@@ -1,17 +1,18 @@
+//go:build !remote
+
 package kube
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/pkg/errors"
-	v1 "k8s.io/api/core/v1"
+	"github.com/containers/podman/v5/libpod"
+	v1 "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
 )
 
 // KubeSeccompPaths holds information about a pod YAML's seccomp configuration
 // it holds both container and pod seccomp paths
-// nolint:golint
 type KubeSeccompPaths struct {
 	containerPaths map[string]string
 	podPath        string
@@ -42,7 +43,7 @@ func InitializeSeccompPaths(annotations map[string]string, profileRoot string) (
 				// this could be caused by a user inputting either of
 				// container.seccomp.security.alpha.kubernetes.io{,/}
 				// both of which are invalid
-				return nil, errors.Errorf("Invalid seccomp path: %s", prefixAndCtr[0])
+				return nil, fmt.Errorf("invalid seccomp path: %s", prefixAndCtr[0])
 			}
 
 			path, err := verifySeccompPath(seccomp, profileRoot)
@@ -80,6 +81,6 @@ func verifySeccompPath(path string, profileRoot string) (string, error) {
 		if parts[0] == "localhost" {
 			return filepath.Join(profileRoot, parts[1]), nil
 		}
-		return "", errors.Errorf("invalid seccomp path: %s", path)
+		return "", fmt.Errorf("invalid seccomp path: %s", path)
 	}
 }

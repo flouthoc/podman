@@ -1,9 +1,9 @@
 package copy
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
-
-	"github.com/pkg/errors"
 )
 
 // ParseSourceAndDestination parses the source and destination input into a
@@ -18,20 +18,8 @@ func ParseSourceAndDestination(source, destination string) (string, string, stri
 	sourceContainer, sourcePath := parseUserInput(source)
 	destContainer, destPath := parseUserInput(destination)
 
-	numContainers := 0
-	if len(sourceContainer) > 0 {
-		numContainers++
-	}
-	if len(destContainer) > 0 {
-		numContainers++
-	}
-
-	if numContainers != 1 {
-		return "", "", "", "", errors.Errorf("invalid arguments %q, %q: exactly 1 container expected but %d specified", source, destination, numContainers)
-	}
-
 	if len(sourcePath) == 0 || len(destPath) == 0 {
-		return "", "", "", "", errors.Errorf("invalid arguments %q, %q: you must specify paths", source, destination)
+		return "", "", "", "", fmt.Errorf("invalid arguments %q, %q: you must specify paths", source, destination)
 	}
 
 	return sourceContainer, sourcePath, destContainer, destPath, nil
@@ -53,9 +41,17 @@ func parseUserInput(input string) (container string, path string) {
 		return
 	}
 
-	if spl := strings.SplitN(path, ":", 2); len(spl) == 2 {
-		container = spl[0]
-		path = spl[1]
+	// If the input is an absolute path, it cannot refer to a container.
+	// This is necessary because absolute paths on Windows will include
+	// a colon, which would cause the drive letter to be parsed as a
+	// container name.
+	if filepath.IsAbs(input) {
+		return
+	}
+
+	if parsedContainer, parsedPath, ok := strings.Cut(path, ":"); ok {
+		container = parsedContainer
+		path = parsedPath
 	}
 	return
 }

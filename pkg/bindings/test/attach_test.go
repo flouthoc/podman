@@ -1,14 +1,14 @@
-package test_bindings
+package bindings_test
 
 import (
 	"bytes"
 	"fmt"
 	"time"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/bindings/containers"
-	"github.com/containers/podman/v3/pkg/specgen"
-	. "github.com/onsi/ginkgo"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/bindings/containers"
+	"github.com/containers/podman/v5/pkg/specgen"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 )
@@ -44,7 +44,8 @@ var _ = Describe("Podman containers attach", func() {
 			timeout := uint(5)
 			err := containers.Stop(bt.conn, id, new(containers.StopOptions).WithTimeout(timeout))
 			if err != nil {
-				GinkgoWriter.Write([]byte(err.Error()))
+				_, writeErr := GinkgoWriter.Write([]byte(err.Error()))
+				Expect(writeErr).ShouldNot(HaveOccurred())
 			}
 		}()
 
@@ -66,7 +67,8 @@ var _ = Describe("Podman containers attach", func() {
 	It("can echo data via cat in container", func() {
 		s := specgen.NewSpecGenerator(alpine.name, false)
 		s.Name = "CatAttachTest"
-		s.Terminal = true
+		localTrue := true
+		s.Terminal = &localTrue
 		s.Command = []string{"/bin/cat"}
 		ctnr, err := containers.CreateWithSpec(bt.conn, s, nil)
 		Expect(err).ShouldNot(HaveOccurred())
@@ -81,10 +83,9 @@ var _ = Describe("Podman containers attach", func() {
 		tickTock := time.NewTimer(2 * time.Second)
 		go func() {
 			<-tickTock.C
-			timeout := uint(5)
-			err := containers.Stop(bt.conn, ctnr.ID, new(containers.StopOptions).WithTimeout(timeout))
+			err := containers.Stop(bt.conn, ctnr.ID, new(containers.StopOptions).WithTimeout(uint(5)))
 			if err != nil {
-				GinkgoWriter.Write([]byte(err.Error()))
+				fmt.Fprint(GinkgoWriter, err.Error())
 			}
 		}()
 

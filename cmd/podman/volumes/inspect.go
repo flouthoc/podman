@@ -1,12 +1,13 @@
 package volumes
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/inspect"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"errors"
+
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/inspect"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
@@ -41,13 +42,13 @@ func init() {
 
 	formatFlagName := "format"
 	flags.StringVarP(&inspectOpts.Format, formatFlagName, "f", "json", "Format volume output using Go template")
-	_ = inspectCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(define.InspectVolumeData{}))
+	_ = inspectCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&define.InspectVolumeData{}))
 }
 
 func volumeInspect(cmd *cobra.Command, args []string) error {
 	if (inspectOpts.All && len(args) > 0) || (!inspectOpts.All && len(args) < 1) {
 		return errors.New("provide one or more volume names or use --all")
 	}
-	inspectOpts.Type = inspect.VolumeType
+	inspectOpts.Type = common.VolumeType
 	return inspect.Inspect(args, *inspectOpts)
 }

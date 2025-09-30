@@ -1,15 +1,22 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/parallel"
+	"github.com/containers/podman/v5/pkg/syncmap"
 	"github.com/sirupsen/logrus"
 )
 
 type containerNode struct {
+	lock       sync.Mutex
 	id         string
 	container  *Container
 	dependsOn  []*containerNode
@@ -60,7 +67,7 @@ func BuildContainerGraph(ctrs []*Container) (*ContainerGraph, error) {
 			// Get the dep's node
 			depNode, ok := graph.nodes[dep]
 			if !ok {
-				return nil, errors.Wrapf(define.ErrNoSuchCtr, "container %s depends on container %s not found in input list", node.id, dep)
+				return nil, fmt.Errorf("container %s depends on container %s not found in input list: %w", node.id, dep, define.ErrNoSuchCtr)
 			}
 
 			// Add the dependent node to the node's dependencies
@@ -85,7 +92,7 @@ func BuildContainerGraph(ctrs []*Container) (*ContainerGraph, error) {
 	if err != nil {
 		return nil, err
 	} else if cycle {
-		return nil, errors.Wrapf(define.ErrInternal, "cycle found in container dependency graph")
+		return nil, fmt.Errorf("cycle found in container dependency graph: %w", define.ErrInternal)
 	}
 
 	return graph, nil
@@ -150,7 +157,7 @@ func detectCycles(graph *ContainerGraph) (bool, error) {
 		if info.lowLink == info.index {
 			l := len(stack)
 			if l == 0 {
-				return false, errors.Wrapf(define.ErrInternal, "empty stack in detectCycles")
+				return false, fmt.Errorf("empty stack in detectCycles: %w", define.ErrInternal)
 			}
 
 			// Pop off the stack
@@ -160,7 +167,7 @@ func detectCycles(graph *ContainerGraph) (bool, error) {
 			// Popped item is no longer on the stack, mark as such
 			topInfo, ok := nodes[topOfStack.id]
 			if !ok {
-				return false, errors.Wrapf(define.ErrInternal, "error finding node info for %s", topOfStack.id)
+				return false, fmt.Errorf("finding node info for %s: %w", topOfStack.id, define.ErrInternal)
 			}
 			topInfo.onStack = false
 
@@ -203,7 +210,7 @@ func startNode(ctx context.Context, node *containerNode, setError bool, ctrError
 	if setError {
 		// Mark us as visited, and set an error
 		ctrsVisited[node.id] = true
-		ctrErrors[node.id] = errors.Wrapf(define.ErrCtrStateInvalid, "a dependency of container %s failed to start", node.id)
+		ctrErrors[node.id] = fmt.Errorf("a dependency of container %s failed to start: %w", node.id, define.ErrCtrStateInvalid)
 
 		// Hit anyone who depends on us, and set errors on them too
 		for _, successor := range node.dependedOn {
@@ -243,7 +250,7 @@ func startNode(ctx context.Context, node *containerNode, setError bool, ctrError
 	} else if len(depsStopped) > 0 {
 		// Our dependencies are not running
 		depsList := strings.Join(depsStopped, ",")
-		ctrErrors[node.id] = errors.Wrapf(define.ErrCtrStateInvalid, "the following dependencies of container %s are not running: %s", node.id, depsList)
+		ctrErrors[node.id] = fmt.Errorf("the following dependencies of container %s are not running: %s: %w", node.id, depsList, define.ErrCtrStateInvalid)
 		ctrErrored = true
 	}
 
@@ -259,7 +266,7 @@ func startNode(ctx context.Context, node *containerNode, setError bool, ctrError
 	}
 
 	// Start the container (only if it is not running)
-	if !ctrErrored {
+	if !ctrErrored && len(node.container.config.InitContainerType) < 1 {
 		if !restart && node.container.state.State != define.ContainerStateRunning {
 			if err := node.container.initAndStart(ctx); err != nil {
 				ctrErrored = true
@@ -280,4 +287,230 @@ func startNode(ctx context.Context, node *containerNode, setError bool, ctrError
 	for _, successor := range node.dependedOn {
 		startNode(ctx, successor, ctrErrored, ctrErrors, ctrsVisited, restart)
 	}
+}
+
+// Contains all details required for traversing the container graph.
+type nodeTraversal struct {
+	// Optional. but *MUST* be locked.
+	// Should NOT be changed once a traversal is started.
+	pod *Pod
+	// Function to execute on the individual container being acted on.
+	// Should NOT be changed once a traversal is started.
+	actionFunc func(ctr *Container, pod *Pod) error
+	// Shared set of errors for all containers currently acted on.
+	ctrErrors *syncmap.Map[string, error]
+	// Shared set of what containers have been visited.
+	ctrsVisited *syncmap.Map[string, bool]
+}
+
+// Perform a traversal of the graph in an inwards direction - meaning from nodes
+// with no dependencies, recursing inwards to the nodes they depend on.
+// Safe to run in parallel on multiple nodes.
+func traverseNodeInwards(node *containerNode, nodeDetails *nodeTraversal, setError bool) {
+	node.lock.Lock()
+
+	// If we already visited this node, we're done.
+	visited := nodeDetails.ctrsVisited.Exists(node.id)
+	if visited {
+		node.lock.Unlock()
+		return
+	}
+
+	// Someone who depends on us failed.
+	// Mark us as failed and recurse.
+	if setError {
+		nodeDetails.ctrsVisited.Put(node.id, true)
+		nodeDetails.ctrErrors.Put(node.id, fmt.Errorf("a container that depends on container %s could not be stopped: %w", node.id, define.ErrCtrStateInvalid))
+
+		node.lock.Unlock()
+
+		// Hit anyone who depends on us, set errors there as well.
+		for _, successor := range node.dependsOn {
+			traverseNodeInwards(successor, nodeDetails, true)
+		}
+
+		return
+	}
+
+	// Does anyone still depend on us?
+	// Cannot stop if true. Once all our dependencies have been stopped,
+	// we will be stopped.
+	for _, dep := range node.dependedOn {
+		// The container that depends on us hasn't been removed yet.
+		// OK to continue on
+		ok := nodeDetails.ctrsVisited.Exists(dep.id)
+		if !ok {
+			node.lock.Unlock()
+			return
+		}
+	}
+
+	ctrErrored := false
+	if err := nodeDetails.actionFunc(node.container, nodeDetails.pod); err != nil {
+		ctrErrored = true
+		nodeDetails.ctrErrors.Put(node.id, err)
+	}
+
+	// Mark as visited *only after* finished with operation.
+	// This ensures that the operation has completed, one way or the other.
+	// If an error was set, only do this after the viral ctrErrored
+	// propagates in traverseNodeInwards below.
+	// Same with the node lock - we don't want to release it until we are
+	// marked as visited.
+	if !ctrErrored {
+		nodeDetails.ctrsVisited.Put(node.id, true)
+
+		node.lock.Unlock()
+	}
+
+	// Recurse to anyone who we depend on and work on them
+	for _, successor := range node.dependsOn {
+		traverseNodeInwards(successor, nodeDetails, ctrErrored)
+	}
+
+	// If we propagated an error, finally mark us as visited here, after
+	// all nodes we traverse to have already been marked failed.
+	// If we don't do this, there is a race condition where a node could try
+	// and perform its operation before it was marked failed by the
+	// traverseNodeInwards triggered by this process.
+	if ctrErrored {
+		nodeDetails.ctrsVisited.Put(node.id, true)
+
+		node.lock.Unlock()
+	}
+}
+
+// Stop all containers in the given graph, assumed to be a graph of pod.
+// Pod is mandatory and should be locked.
+func stopContainerGraph(ctx context.Context, graph *ContainerGraph, pod *Pod, timeout *uint, cleanup bool) (map[string]error, error) {
+	// Are there actually any containers in the graph?
+	// If not, return immediately.
+	if len(graph.nodes) == 0 {
+		return map[string]error{}, nil
+	}
+
+	nodeDetails := new(nodeTraversal)
+	nodeDetails.pod = pod
+	nodeDetails.ctrErrors = syncmap.New[string, error]()
+	nodeDetails.ctrsVisited = syncmap.New[string, bool]()
+
+	traversalFunc := func(ctr *Container, pod *Pod) error {
+		ctr.lock.Lock()
+		defer ctr.lock.Unlock()
+
+		if err := ctr.syncContainer(); err != nil {
+			return err
+		}
+
+		realTimeout := ctr.config.StopTimeout
+		if timeout != nil {
+			realTimeout = *timeout
+		}
+
+		if err := ctr.stop(realTimeout); err != nil && !errors.Is(err, define.ErrCtrStateInvalid) && !errors.Is(err, define.ErrCtrStopped) {
+			return err
+		}
+
+		if cleanup {
+			return ctr.fullCleanup(ctx, false)
+		}
+
+		return nil
+	}
+	nodeDetails.actionFunc = traversalFunc
+
+	doneChans := make([]<-chan error, 0, len(graph.notDependedOnNodes))
+
+	// Parallel enqueue jobs for all our starting nodes.
+	if len(graph.notDependedOnNodes) == 0 {
+		return nil, fmt.Errorf("no containers in pod %s are not dependencies of other containers, unable to stop", pod.ID())
+	}
+	for _, node := range graph.notDependedOnNodes {
+		doneChan := parallel.Enqueue(ctx, func() error {
+			traverseNodeInwards(node, nodeDetails, false)
+			return nil
+		})
+		doneChans = append(doneChans, doneChan)
+	}
+
+	// We don't care about the returns values, these functions always return nil
+	// But we do need all of the parallel jobs to terminate.
+	for _, doneChan := range doneChans {
+		<-doneChan
+	}
+
+	return nodeDetails.ctrErrors.Underlying(), nil
+}
+
+// Remove all containers in the given graph
+// Pod is optional, and must be locked if given.
+func removeContainerGraph(ctx context.Context, graph *ContainerGraph, pod *Pod, timeout *uint, force bool) (map[string]*ContainerNamedVolume, map[string]bool, map[string]error, error) {
+	// Are there actually any containers in the graph?
+	// If not, return immediately.
+	if len(graph.nodes) == 0 {
+		return nil, nil, nil, nil
+	}
+
+	nodeDetails := new(nodeTraversal)
+	nodeDetails.pod = pod
+	nodeDetails.ctrErrors = syncmap.New[string, error]()
+	nodeDetails.ctrsVisited = syncmap.New[string, bool]()
+
+	ctrNamedVolumes := syncmap.New[string, *ContainerNamedVolume]()
+
+	traversalFunc := func(ctr *Container, pod *Pod) error {
+		ctr.lock.Lock()
+		defer ctr.lock.Unlock()
+
+		if err := ctr.syncContainer(); err != nil {
+			return err
+		}
+
+		for _, vol := range ctr.config.NamedVolumes {
+			ctrNamedVolumes.Put(vol.Name, vol)
+		}
+
+		if pod != nil && pod.state.InfraContainerID == ctr.ID() {
+			pod.state.InfraContainerID = ""
+			if err := pod.save(); err != nil {
+				return fmt.Errorf("error removing infra container %s from pod %s: %w", ctr.ID(), pod.ID(), err)
+			}
+		}
+
+		opts := ctrRmOpts{
+			Force:     force,
+			RemovePod: true,
+			Timeout:   timeout,
+		}
+
+		if _, _, err := ctr.runtime.removeContainer(ctx, ctr, opts); err != nil {
+			return err
+		}
+
+		return nil
+	}
+	nodeDetails.actionFunc = traversalFunc
+
+	doneChans := make([]<-chan error, 0, len(graph.notDependedOnNodes))
+
+	// Parallel enqueue jobs for all our starting nodes.
+	if len(graph.notDependedOnNodes) == 0 {
+		return nil, nil, nil, fmt.Errorf("no containers in graph are not dependencies of other containers, unable to stop")
+	}
+	for _, node := range graph.notDependedOnNodes {
+		doneChan := parallel.Enqueue(ctx, func() error {
+			traverseNodeInwards(node, nodeDetails, false)
+			return nil
+		})
+		doneChans = append(doneChans, doneChan)
+	}
+
+	// We don't care about the returns values, these functions always return nil
+	// But we do need all of the parallel jobs to terminate.
+	for _, doneChan := range doneChans {
+		<-doneChan
+	}
+
+	// Safe to use Underlying as the SyncMap passes out of scope as we return
+	return ctrNamedVolumes.Underlying(), nodeDetails.ctrsVisited.Underlying(), nodeDetails.ctrErrors.Underlying(), nil
 }

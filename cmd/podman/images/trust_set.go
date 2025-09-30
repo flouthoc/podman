@@ -1,16 +1,16 @@
 package images
 
 import (
+	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -41,7 +41,7 @@ func init() {
 	_ = setFlags.MarkHidden("policypath")
 
 	pubkeysfileFlagName := "pubkeysfile"
-	setFlags.StringSliceVarP(&setOptions.PubKeysFile, pubkeysfileFlagName, "f", []string{}, `Path of installed public key(s) to trust for TARGET.
+	setFlags.StringArrayVarP(&setOptions.PubKeysFile, pubkeysfileFlagName, "f", []string{}, `Path of installed public key(s) to trust for TARGET.
 Absolute path to keys is added to policy.json. May
 used multiple times to define multiple public keys.
 File(s) must exist before using this command`)
@@ -53,15 +53,15 @@ File(s) must exist before using this command`)
 }
 
 func setTrust(cmd *cobra.Command, args []string) error {
-	validTrustTypes := []string{"accept", "insecureAcceptAnything", "reject", "signedBy"}
+	validTrustTypes := []string{"accept", "insecureAcceptAnything", "reject", "signedBy", "sigstoreSigned"}
 
 	valid, err := isValidImageURI(args[0])
 	if err != nil || !valid {
 		return err
 	}
 
-	if !util.StringInSlice(setOptions.Type, validTrustTypes) {
-		return errors.Errorf("invalid choice: %s (choose from 'accept', 'reject', 'signedBy')", setOptions.Type)
+	if !slices.Contains(validTrustTypes, setOptions.Type) {
+		return fmt.Errorf("invalid choice: %s (choose from 'accept', 'reject', 'signedBy', 'sigstoreSigned')", setOptions.Type)
 	}
 	return registry.ImageEngine().SetTrust(registry.Context(), args, setOptions)
 }
@@ -71,17 +71,17 @@ func isValidImageURI(imguri string) (bool, error) {
 	uri := "http://" + imguri
 	u, err := url.Parse(uri)
 	if err != nil {
-		return false, errors.Wrapf(err, "invalid image uri: %s", imguri)
+		return false, fmt.Errorf("invalid image uri: %s: %w", imguri, err)
 	}
 	reg := regexp.MustCompile(`^[a-zA-Z0-9-_\.]+\/?:?[0-9]*[a-z0-9-\/:]*$`)
 	ret := reg.FindAllString(u.Host, -1)
 	if len(ret) == 0 {
-		return false, errors.Wrapf(err, "invalid image uri: %s", imguri)
+		return false, fmt.Errorf("invalid image uri: %s: %w", imguri, err)
 	}
 	reg = regexp.MustCompile(`^[a-z0-9-:\./]*$`)
 	ret = reg.FindAllString(u.Fragment, -1)
 	if len(ret) == 0 {
-		return false, errors.Wrapf(err, "invalid image uri: %s", imguri)
+		return false, fmt.Errorf("invalid image uri: %s: %w", imguri, err)
 	}
 	return true, nil
 }

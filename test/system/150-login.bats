@@ -4,36 +4,9 @@
 #
 
 load helpers
+load helpers.network
+load helpers.registry
 
-###############################################################################
-# BEGIN one-time envariable setup
-
-# Create a scratch directory; our podman registry will run from here. We
-# also use it for other temporary files like authfiles.
-if [ -z "${PODMAN_LOGIN_WORKDIR}" ]; then
-    export PODMAN_LOGIN_WORKDIR=$(mktemp -d --tmpdir=${BATS_TMPDIR:-${TMPDIR:-/tmp}} podman_bats_login.XXXXXX)
-fi
-
-# Randomly-generated username and password
-if [ -z "${PODMAN_LOGIN_USER}" ]; then
-    export PODMAN_LOGIN_USER="user$(random_string 4)"
-    export PODMAN_LOGIN_PASS=$(random_string 15)
-fi
-
-# Randomly-assigned port in the 5xxx range
-if [ -z "${PODMAN_LOGIN_REGISTRY_PORT}" ]; then
-    for port in $(shuf -i 5000-5999);do
-        if ! { exec 3<> /dev/tcp/127.0.0.1/$port; } &>/dev/null; then
-            export PODMAN_LOGIN_REGISTRY_PORT=$port
-            break
-        fi
-    done
-fi
-
-# Override any user-set path to an auth file
-unset REGISTRY_AUTH_FILE
-
-# END   one-time envariable setup
 ###############################################################################
 # BEGIN filtering - none of these tests will work with podman-remote
 
@@ -41,67 +14,10 @@ function setup() {
     skip_if_remote "none of these tests work with podman-remote"
 
     basic_setup
+    start_registry
 }
 
 # END   filtering - none of these tests will work with podman-remote
-###############################################################################
-# BEGIN first "test" - start a registry for use by other tests
-#
-# This isn't really a test: it's a helper that starts a local registry.
-# Note that we're careful to use a root/runroot separate from our tests,
-# so setup/teardown don't clobber our registry image.
-#
-
-@test "podman login [start registry]" {
-    AUTHDIR=${PODMAN_LOGIN_WORKDIR}/auth
-    mkdir -p $AUTHDIR
-
-    # Registry image; copy of docker.io, but on our own registry
-    local REGISTRY_IMAGE="$PODMAN_TEST_IMAGE_REGISTRY/$PODMAN_TEST_IMAGE_USER/registry:2.7"
-
-    # Pull registry image, but into a separate container storage
-    mkdir -p ${PODMAN_LOGIN_WORKDIR}/root
-    mkdir -p ${PODMAN_LOGIN_WORKDIR}/runroot
-    PODMAN_LOGIN_ARGS="--storage-driver=vfs --root ${PODMAN_LOGIN_WORKDIR}/root --runroot ${PODMAN_LOGIN_WORKDIR}/runroot"
-    # Give it three tries, to compensate for flakes
-    run_podman ${PODMAN_LOGIN_ARGS} pull $REGISTRY_IMAGE ||
-        run_podman ${PODMAN_LOGIN_ARGS} pull $REGISTRY_IMAGE ||
-        run_podman ${PODMAN_LOGIN_ARGS} pull $REGISTRY_IMAGE
-
-    # Registry image needs a cert. Self-signed is good enough.
-    CERT=$AUTHDIR/domain.crt
-    if [ ! -e $CERT ]; then
-        openssl req -newkey rsa:4096 -nodes -sha256 \
-                -keyout $AUTHDIR/domain.key -x509 -days 2 \
-                -out $AUTHDIR/domain.crt \
-                -subj "/C=US/ST=Foo/L=Bar/O=Red Hat, Inc./CN=localhost"
-    fi
-
-    # Store credentials where container will see them
-    if [ ! -e $AUTHDIR/htpasswd ]; then
-        htpasswd -Bbn ${PODMAN_LOGIN_USER} ${PODMAN_LOGIN_PASS} \
-                 > $AUTHDIR/htpasswd
-
-        # In case $PODMAN_TEST_KEEP_LOGIN_REGISTRY is set, for testing later
-        echo "${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS}" \
-             > $AUTHDIR/htpasswd-plaintext
-    fi
-
-    # Run the registry container.
-    run_podman '?' ${PODMAN_LOGIN_ARGS} rm -f registry
-    run_podman ${PODMAN_LOGIN_ARGS} run -d \
-               -p ${PODMAN_LOGIN_REGISTRY_PORT}:5000 \
-               --name registry \
-               -v $AUTHDIR:/auth:Z \
-               -e "REGISTRY_AUTH=htpasswd" \
-               -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
-               -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
-               -e REGISTRY_HTTP_TLS_CERTIFICATE=/auth/domain.crt \
-               -e REGISTRY_HTTP_TLS_KEY=/auth/domain.key \
-               $REGISTRY_IMAGE
-}
-
-# END   first "test" - start a registry for use by other tests
 ###############################################################################
 # BEGIN actual tests
 # BEGIN primary podman login/push/pull tests
@@ -127,7 +43,7 @@ function setup() {
                --password-stdin \
                $registry <<< "x${PODMAN_LOGIN_PASS}"
     is "$output" \
-       "Error: error logging into \"$registry\": invalid username/password" \
+       "Error: logging into \"$registry\": invalid username/password" \
        'output from podman login'
 }
 
@@ -164,6 +80,49 @@ function setup() {
     is "$output" "{}" "credentials removed from $authfile"
 }
 
+@test "podman login inconsistent authfiles" {
+    ambiguous_file=${PODMAN_LOGIN_WORKDIR}/ambiguous-auth.json
+    echo '{}' > $ambiguous_file # To make sure we are not hitting the “file not found” path
+
+    run_podman 125 login --authfile "$ambiguous_file" --compat-auth-file "$ambiguous_file" localhost:5000
+    assert "$output" =~ "Error: options for paths to the credential file and to the Docker-compatible credential file can not be set simultaneously"
+
+    run_podman 125 logout --authfile "$ambiguous_file" --compat-auth-file "$ambiguous_file" localhost:5000
+    assert "$output" =~ "Error: options for paths to the credential file and to the Docker-compatible credential file can not be set simultaneously"
+}
+
+@test "podman login - check with --config global option" {
+    dockerconfig=${PODMAN_LOGIN_WORKDIR}/docker
+    rm -rf $dockerconfig
+
+    registry=localhost:${PODMAN_LOGIN_REGISTRY_PORT}
+
+    run_podman --config $dockerconfig login \
+        --tls-verify=false \
+        --username ${PODMAN_LOGIN_USER} \
+        --password ${PODMAN_LOGIN_PASS} \
+        $registry
+
+    # Confirm that config file now exists
+    test -e $dockerconfig/config.json || \
+        die "podman login did not create config $dockerconfig/config.json"
+
+    # Special bracket form needed because of colon in host:port
+    run jq -r ".[\"auths\"][\"$registry\"][\"auth\"]" <$dockerconfig/config.json
+    is "$status" "0" "jq from $dockerconfig/config.json"
+
+    expect_userpass="${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS}"
+    actual_userpass=$(base64 -d <<<"$output")
+    is "$actual_userpass" "$expect_userpass" "credentials stored in $dockerconfig/config.json"
+
+    # Now log out and make sure credentials are removed
+    run_podman --config $dockerconfig logout $registry
+
+    run jq -r '.auths' <$dockerconfig/config.json
+    is "$status" "0" "jq from $dockerconfig/config.json"
+    is "$output" "{}" "credentials removed from $dockerconfig/config.json"
+}
+
 # Some push tests
 @test "podman push fail" {
 
@@ -185,24 +144,46 @@ EOF
     run_podman 125 push --authfile=$authfile \
         --tls-verify=false $IMAGE \
         localhost:${PODMAN_LOGIN_REGISTRY_PORT}/badpush:1
-    is "$output" ".*: unauthorized: authentication required" \
+    is "$output" ".* checking whether a blob .* exists in localhost:${PODMAN_LOGIN_REGISTRY_PORT}/badpush: authentication required" \
        "auth error on push"
 }
 
-@test "podman push ok" {
+function _push_search_test() {
     # Preserve image ID for later comparison against push/pulled image
     run_podman inspect --format '{{.Id}}' $IMAGE
     iid=$output
 
     destname=ok-$(random_string 10 | tr A-Z a-z)-ok
     # Use command-line credentials
-    run_podman push --tls-verify=false \
+    run_podman push --tls-verify=$1 \
                --format docker \
+               --cert-dir ${PODMAN_LOGIN_WORKDIR}/trusted-registry-cert-dir \
                --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
                $IMAGE localhost:${PODMAN_LOGIN_REGISTRY_PORT}/$destname
 
+    # Search a pushed image without --cert-dir should fail if --tls-verify=true
+    run_podman $2 search --tls-verify=$1 \
+               --format "table {{.Name}}" \
+               --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
+               localhost:${PODMAN_LOGIN_REGISTRY_PORT}/$destname
+
+    # Search a pushed image without --creds should fail
+    run_podman 125 search --tls-verify=$1 \
+               --format "table {{.Name}}" \
+               --cert-dir ${PODMAN_LOGIN_WORKDIR}/trusted-registry-cert-dir \
+               localhost:${PODMAN_LOGIN_REGISTRY_PORT}/$destname
+
+    # Search a pushed image should succeed
+    run_podman search --tls-verify=$1 \
+               --format "table {{.Name}}" \
+               --cert-dir ${PODMAN_LOGIN_WORKDIR}/trusted-registry-cert-dir \
+               --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
+               localhost:${PODMAN_LOGIN_REGISTRY_PORT}/$destname
+    is "${lines[1]}" "localhost:${PODMAN_LOGIN_REGISTRY_PORT}/$destname" "search output is destname"
+
     # Yay! Pull it back
-    run_podman pull --tls-verify=false \
+    run_podman pull --tls-verify=$1 \
+               --cert-dir ${PODMAN_LOGIN_WORKDIR}/trusted-registry-cert-dir \
                --creds ${PODMAN_LOGIN_USER}:${PODMAN_LOGIN_PASS} \
                localhost:${PODMAN_LOGIN_REGISTRY_PORT}/$destname
 
@@ -211,6 +192,14 @@ EOF
     is "$output" "$iid" "Image ID of pulled image == original IID"
 
     run_podman rmi $destname
+}
+
+@test "podman push and search ok with --tls-verify=false" {
+    _push_search_test false 0
+}
+
+@test "podman push and search ok with --tls-verify=true" {
+    _push_search_test true 125
 }
 
 # END   primary podman login/push/pull tests
@@ -250,7 +239,7 @@ function _test_skopeo_credential_sharing() {
     is "$status" "0" "skopeo inspect - exit status"
 
     got_name=$(jq -r .Name <<<"$output")
-    is "$got_name" "$registry/$dest_name" "skopeo inspect -> Name"
+    is "$got_name" "$registry/$destname" "skopeo inspect -> Name"
 
     # Now try without a valid login; it should fail
     run_podman logout "$@" $registry
@@ -258,16 +247,11 @@ function _test_skopeo_credential_sharing() {
     run skopeo inspect "$@" --tls-verify=false docker://$registry/$destname
     echo "$output"
     is "$status" "1" "skopeo inspect - exit status"
-    is "$output" ".*: unauthorized: authentication required" \
+    is "$output" ".*: authentication required" \
        "auth error on skopeo inspect"
 }
 
 @test "podman login - shares credentials with skopeo - default auth file" {
-    if is_rootless; then
-        if [ -z "${XDG_RUNTIME_DIR}" ]; then
-            skip "skopeo does not match podman when XDG_RUNTIME_DIR unset; #823"
-        fi
-    fi
     _test_skopeo_credential_sharing
 }
 
@@ -295,36 +279,127 @@ function _test_skopeo_credential_sharing() {
     rm -f $authfile
 }
 
-# END   cooperation with skopeo
-# END   actual tests
-###############################################################################
-# BEGIN teardown (remove the registry container)
+@test "podman login -secret test" {
+    secret=$(random_string 10)
+    echo -n ${PODMAN_LOGIN_PASS} > $PODMAN_TMPDIR/secret.file
+    run_podman secret create $secret $PODMAN_TMPDIR/secret.file
+    secretID=${output}
+    run_podman login --tls-verify=false \
+             --username ${PODMAN_LOGIN_USER} \
+             --secret ${secretID} \
+             localhost:${PODMAN_LOGIN_REGISTRY_PORT}
+    is "$output" "Login Succeeded!" "output from podman login"
+    # Now log out
+    run_podman logout localhost:${PODMAN_LOGIN_REGISTRY_PORT}
+    is "$output" "Removed login credentials for localhost:${PODMAN_LOGIN_REGISTRY_PORT}" \
+       "output from podman logout"
+    run_podman secret rm $secret
 
-@test "podman login [stop registry, clean up]" {
-    # For manual debugging; user may request keeping the registry running
-    if [ -n "${PODMAN_TEST_KEEP_LOGIN_REGISTRY}" ]; then
-        skip "[leaving registry running by request]"
-    fi
+    # test using secret id as --username
+    run_podman secret create ${PODMAN_LOGIN_USER} $PODMAN_TMPDIR/secret.file
+    run_podman login --tls-verify=false \
+               --secret ${PODMAN_LOGIN_USER} \
+               localhost:${PODMAN_LOGIN_REGISTRY_PORT}
+    is "$output" "Login Succeeded!" "output from podman login"
+    # Now log out
+    run_podman logout localhost:${PODMAN_LOGIN_REGISTRY_PORT}
+    is "$output" "Removed login credentials for localhost:${PODMAN_LOGIN_REGISTRY_PORT}" \
+       "output from podman logout"
+    run_podman secret rm ${PODMAN_LOGIN_USER}
 
-    run_podman --storage-driver=vfs --root    ${PODMAN_LOGIN_WORKDIR}/root   \
-               --runroot ${PODMAN_LOGIN_WORKDIR}/runroot \
-               rm -f registry
-    run_podman --storage-driver=vfs --root    ${PODMAN_LOGIN_WORKDIR}/root   \
-               --runroot ${PODMAN_LOGIN_WORKDIR}/runroot \
-               rmi -a
+    bogus_secret=$(random_string 10)
+    echo -n ${bogus_secret} > $PODMAN_TMPDIR/secret.file
+    run_podman secret create $secret $PODMAN_TMPDIR/secret.file
+    secretID=${output}
+    run_podman 125 login --tls-verify=false \
+             --username ${PODMAN_LOGIN_USER} \
+             --secret ${secretID} \
+             localhost:${PODMAN_LOGIN_REGISTRY_PORT}
 
-    # By default, clean up
-    if [ -z "${PODMAN_TEST_KEEP_LOGIN_WORKDIR}" ]; then
-        rm -rf ${PODMAN_LOGIN_WORKDIR}
-    fi
+    is "$output" "Error: logging into \"localhost:${PODMAN_LOGIN_REGISTRY_PORT}\": invalid username/password" "output from failed podman login"
 
-    # Make sure socket is closed
-    if { exec 3<> /dev/tcp/127.0.0.1/${PODMAN_LOGIN_REGISTRY_PORT}; } &>/dev/null; then
-        die "Socket still seems open"
-    fi
+    run_podman secret rm $secret
+
 }
 
-# END   teardown (remove the registry container)
+@test "podman pull images with retry" {
+    run_podman pull -q --retry 4 --retry-delay "10s" $IMAGE
+    run_podman 125 pull -q --retry 4 --retry-delay "bogus" $IMAGE
+    is "$output" 'Error: time: invalid duration "bogus"' "bad retry-delay"
+
+    skip_if_remote "running a local registry doesn't work with podman-remote"
+    start_registry
+    authfile=${PODMAN_LOGIN_WORKDIR}/auth-$(random_string 10).json
+    run_podman login --tls-verify=false \
+               --username ${PODMAN_LOGIN_USER} \
+               --password-stdin \
+               --authfile=$authfile \
+               localhost:${PODMAN_LOGIN_REGISTRY_PORT} <<<"${PODMAN_LOGIN_PASS}"
+    is "$output" "Login Succeeded!" "output from podman login"
+
+    image1="localhost:${PODMAN_LOGIN_REGISTRY_PORT}/test:1.0"
+
+    run_podman tag $IMAGE $image1
+    run_podman push --authfile=$authfile \
+        --tls-verify=false $mid \
+        $image1
+    run_podman rmi $image1
+
+    run_podman images $IMAGE --format {{.ID}}
+    local podman_image_id=$output
+
+    run_podman pull -q --retry 4 --retry-delay "0s" --authfile=$authfile \
+        --tls-verify=false $image1
+    assert "${output:0:12}" = "$podman_image_id" "First pull (before stopping registry)"
+    run_podman rmi $image1
+
+    # This actually STOPs the registry, so the port is unbound...
+    pause_registry
+    # ...then, in eight seconds, we start it again
+    (sleep 8; unpause_registry) &
+    run_podman 0+w pull -q --retry 4 --retry-delay "5s" --authfile=$authfile \
+            --tls-verify=false $image1
+    assert "$output" =~ "Failed, retrying in 5s.*Error: initializing.* connection refused"
+    assert "${lines[-1]:0:12}" = "$podman_image_id" "push should succeed via retry"
+    unpause_registry
+
+    run_podman rmi $image1
+}
+
+@test "podman containers.conf retry" {
+    skip_if_remote "containers.conf settings not set for remote connections"
+    run_podman pull --help
+    assert "$output" =~ "--retry .*performing pull \(default 3\)"
+
+    run_podman push --help
+    assert "$output" =~ "--retry .*performing push \(default 3\)"
+
+    containersConf=$PODMAN_TMPDIR/containers.conf
+    cat >$containersConf <<EOF
+[engine]
+retry=10
+retry_delay="5s"
+EOF
+
+    CONTAINERS_CONF="$containersConf" run_podman pull --help
+    assert "$output" =~ "--retry .*performing pull \(default 10\)"
+    assert "$output" =~ "--retry-delay .*pull failures \(default \"5s\"\)"
+
+    CONTAINERS_CONF="$containersConf" run_podman push --help
+    assert "$output" =~ "--retry .*performing push \(default 10\)"
+    assert "$output" =~ "--retry-delay .*push failures \(default \"5s\"\)"
+
+    CONTAINERS_CONF="$containersConf" run_podman create --help
+    assert "$output" =~ "--retry .*performing pull \(default 10\)"
+    assert "$output" =~ "--retry-delay .*pull failures \(default \"5s\"\)"
+
+    CONTAINERS_CONF="$containersConf" run_podman run --help
+    assert "$output" =~ "--retry .*performing pull \(default 10\)"
+    assert "$output" =~ "--retry-delay .*pull failures \(default \"5s\"\)"
+}
+
+# END   cooperation with skopeo
+# END   actual tests
 ###############################################################################
 
 # vim: filetype=sh

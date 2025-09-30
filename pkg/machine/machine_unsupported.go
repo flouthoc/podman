@@ -1,3 +1,3 @@
-// +build !amd64 amd64,windows
+//go:build !amd64 && !arm64
 
 package machine

@@ -1,15 +1,15 @@
-export GO111MODULE=off
-
 SWAGGER_OUT ?= swagger.yaml
 
+SWAGGER ?= ../../test/tools/build/swagger
+
 validate: ${SWAGGER_OUT}
-	swagger validate ${SWAGGER_OUT}
+	$(SWAGGER) validate ${SWAGGER_OUT}
 
 serve: ${SWAGGER_OUT}
-	swagger serve -F redoc -p=8080 swagger.yaml
+	$(SWAGGER) serve -F redoc -p=8080 swagger.yaml
 
 .PHONY: ${SWAGGER_OUT}
 ${SWAGGER_OUT}:
 	# generate doesn't remove file on error
 	rm -f ${SWAGGER_OUT}
-	swagger generate spec -o ${SWAGGER_OUT} -i tags.yaml -w ./ -m
+	$(SWAGGER) generate spec -x github.com/sigstore/rekor -x github.com/docker/docker/api/types/network -o ${SWAGGER_OUT} -i tags.yaml -w ./ -m

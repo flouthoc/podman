@@ -1,22 +1,29 @@
-// +build amd64,linux arm64,linux amd64,darwin arm64,darwin
+//go:build amd64 || arm64
 
 package machine
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/machine"
-	"github.com/containers/podman/v3/pkg/machine/qemu"
-	"github.com/pkg/errors"
+	"fmt"
+
+	"github.com/containers/podman/v5/pkg/machine/define"
+	"github.com/containers/podman/v5/pkg/machine/env"
+
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/pkg/machine"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
 	sshCmd = &cobra.Command{
-		Use:   "ssh [NAME] [COMMAND [ARG ...]]",
-		Short: "SSH into an existing machine",
-		Long:  "SSH into a managed virtual machine ",
-		RunE:  ssh,
-		Example: `podman machine ssh myvm
+		Use:               "ssh [options] [NAME] [COMMAND [ARG ...]]",
+		Short:             "SSH into an existing machine",
+		Long:              "SSH into a managed virtual machine ",
+		PersistentPreRunE: machinePreRunE,
+		RunE:              ssh,
+		Example: `podman machine ssh podman-machine-default
   podman machine ssh myvm echo hello`,
 		ValidArgsFunction: autocompleteMachineSSH,
 	}
@@ -32,15 +39,25 @@ func init() {
 		Command: sshCmd,
 		Parent:  machineCmd,
 	})
+	flags := sshCmd.Flags()
+	usernameFlagName := "username"
+	flags.StringVar(&sshOpts.Username, usernameFlagName, "", "Username to use when ssh-ing into the VM.")
+	_ = sshCmd.RegisterFlagCompletionFunc(usernameFlagName, completion.AutocompleteNone)
 }
+
+// TODO Remember that this changed upstream and needs to updated as such!
 
 func ssh(cmd *cobra.Command, args []string) error {
 	var (
 		err     error
+		mc      *vmconfigs.MachineConfig
 		validVM bool
-		vm      machine.VM
-		vmType  string
 	)
+
+	dirs, err := env.GetMachineDirs(provider.VMType())
+	if err != nil {
+		return err
+	}
 
 	// Set the VM to default
 	vmName := defaultMachineName
@@ -48,19 +65,22 @@ func ssh(cmd *cobra.Command, args []string) error {
 	// provided the VM name.  If so, we check.  The VM name,
 	// if provided, must be in args[0].
 	if len(args) > 0 {
-		switch vmType {
-		default:
-			validVM, err = qemu.IsValidVMName(args[0])
-			if err != nil {
-				return err
-			}
-			if validVM {
-				vmName = args[0]
-			} else {
-				sshOpts.Args = append(sshOpts.Args, args[0])
-			}
+		// note: previous incantations of this up by a specific name
+		// and errors were ignored.  this error is not ignored because
+		// it implies podman cannot read its machine files, which is bad
+		machines, err := vmconfigs.LoadMachinesInDir(dirs)
+		if err != nil {
+			return err
+		}
+
+		mc, validVM = machines[args[0]]
+		if validVM {
+			vmName = args[0]
+		} else {
+			sshOpts.Args = append(sshOpts.Args, args[0])
 		}
 	}
+
 	// If len is greater than 1, it means we might have been
 	// given a vmname and args or just args
 	if len(args) > 1 {
@@ -71,12 +91,30 @@ func ssh(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	switch vmType {
-	default:
-		vm, err = qemu.LoadVMByName(vmName)
+	// If the machine config was not loaded earlier, we load it now
+	if mc == nil {
+		mc, err = vmconfigs.LoadMachineByName(vmName, dirs)
+		if err != nil {
+			return fmt.Errorf("vm %s not found: %w", vmName, err)
+		}
 	}
+
+	state, err := provider.State(mc, false)
 	if err != nil {
-		return errors.Wrapf(err, "vm %s not found", vmName)
+		return err
 	}
-	return vm.SSH(vmName, sshOpts)
+	if state != define.Running {
+		return fmt.Errorf("vm %q is not running", mc.Name)
+	}
+
+	if sshOpts.Username == "" {
+		if mc.HostUser.Rootful {
+			sshOpts.Username = "root"
+		} else {
+			sshOpts.Username = mc.SSH.RemoteUsername
+		}
+	}
+
+	err = machine.LocalhostSSHShell(sshOpts.Username, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, sshOpts.Args)
+	return utils.HandleOSExecError(err)
 }

@@ -1,9 +1,11 @@
+//go:build !remote
+
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/api/handlers/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
 )
 
@@ -24,13 +26,13 @@ func (s *APIServer) registerHealthCheckHandlers(r *mux.Router) error {
 	// - application/json
 	// responses:
 	//   200:
-	//     $ref: "#/responses/HealthcheckRun"
+	//     $ref: "#/responses/healthCheck"
 	//   404:
-	//     $ref: "#/responses/NoSuchContainer"
+	//     $ref: "#/responses/containerNotFound"
 	//   409:
 	//     description: container has no healthcheck or is not running
 	//   500:
-	//     $ref: '#/responses/InternalError'
+	//     $ref: '#/responses/internalError'
 	r.Handle(VersionedPath("/libpod/containers/{name:.*}/healthcheck"), s.APIHandler(libpod.RunHealthCheck)).Methods(http.MethodGet)
 	return nil
 }

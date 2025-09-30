@@ -1,18 +1,19 @@
 package registry
 
 import (
+	"fmt"
+	"os"
 	"strings"
 
-	"github.com/containers/podman/v3/utils"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/utils"
 	"github.com/sirupsen/logrus"
 )
 
 const (
-	imageKey = "PODMAN_REGISTRY_IMAGE"
-	userKey  = "PODMAN_REGISTRY_USER"
-	passKey  = "PODMAN_REGISTRY_PASS"
-	portKey  = "PODMAN_REGISTRY_PORT"
+	ImageKey = "PODMAN_REGISTRY_IMAGE"
+	UserKey  = "PODMAN_REGISTRY_USER"
+	PassKey  = "PODMAN_REGISTRY_PASS"
+	PortKey  = "PODMAN_REGISTRY_PORT"
 )
 
 var binary = "podman-registry"
@@ -31,52 +32,82 @@ type Registry struct {
 	running bool
 }
 
-// Start a new registry and return it along with it's image, user, password, and port.
-func Start() (*Registry, error) {
+// Options allows for customizing a registry.
+type Options struct {
+	// PodmanPath - path to podman executable
+	PodmanPath string
+	// PodmanArgs - array of podman options
+	PodmanArgs []string
+	// Image - custom registry image.
+	Image string
+}
+
+// StartWithOptions a new registry and return it along with its image, user, password, and port.
+func StartWithOptions(options *Options) (*Registry, error) {
+	if options == nil {
+		options = &Options{}
+	}
+
+	var args []string
+	if options.Image != "" {
+		args = append(args, "-i", options.Image)
+	}
+	args = append(args, "start")
+
+	podmanCmd := []string{"podman"}
+	if options.PodmanPath != "" {
+		podmanCmd[0] = options.PodmanPath
+	}
+	if len(options.PodmanArgs) != 0 {
+		podmanCmd = append(podmanCmd, options.PodmanArgs...)
+	}
+
 	// Start a registry.
-	out, err := utils.ExecCmd(binary, "start")
+	os.Setenv("PODMAN", strings.Join(podmanCmd, " "))
+	out, err := utils.ExecCmd(binary, args...)
+	os.Unsetenv("PODMAN")
 	if err != nil {
-		return nil, errors.Wrapf(err, "error running %q: %s", binary, out)
+		return nil, fmt.Errorf("running %q: %s: %w", binary, out, err)
 	}
 
 	// Parse the output.
 	registry := Registry{}
-	for _, s := range strings.Split(out, "\n") {
+	for s := range strings.SplitSeq(out, "\n") {
 		if s == "" {
 			continue
 		}
 		spl := strings.Split(s, "=")
 		if len(spl) != 2 {
-			return nil, errors.Errorf("unexpected output format %q: want 'PODMAN_...=...'", s)
+			return nil, fmt.Errorf("unexpected output format %q: want 'PODMAN_...=...'", s)
 		}
 		key := spl[0]
 		val := strings.TrimSuffix(strings.TrimPrefix(spl[1], "\""), "\"")
 		switch key {
-		case imageKey:
+		case ImageKey:
 			registry.Image = val
-		case userKey:
+		case UserKey:
 			registry.User = val
-		case passKey:
+		case PassKey:
 			registry.Password = val
-		case portKey:
+		case PortKey:
 			registry.Port = val
 		default:
-			logrus.Errorf("unexpected podman-registry output: %q", s)
+			logrus.Errorf("Unexpected podman-registry output: %q", s)
 		}
 	}
 
 	// Extra sanity check.
 	if registry.Image == "" {
-		return nil, errors.Errorf("unexpected output %q: %q missing", out, imageKey)
+		return nil, fmt.Errorf("unexpected output %q: %q missing", out, ImageKey)
 	}
 	if registry.User == "" {
-		return nil, errors.Errorf("unexpected output %q: %q missing", out, userKey)
+		return nil, fmt.Errorf("unexpected output %q: %q missing", out, UserKey)
 	}
 	if registry.Password == "" {
-		return nil, errors.Errorf("unexpected output %q: %q missing", out, passKey)
+		return nil, fmt.Errorf("unexpected output %q: %q missing", out, PassKey)
 	}
 	if registry.Port == "" {
-		return nil, errors.Errorf("unexpected output %q: %q missing", out, portKey)
+		return nil, fmt.Errorf("unexpected output %q: %q missing", out, PortKey)
 	}
 
 	registry.running = true
@@ -91,7 +122,7 @@ func (r *Registry) Stop() error {
 		return nil
 	}
 	if _, err := utils.ExecCmd(binary, "-P", r.Port, "stop"); err != nil {
-		return errors.Wrapf(err, "error stopping registry (%v) with %q", *r, binary)
+		return fmt.Errorf("stopping registry (%v) with %q: %w", *r, binary, err)
 	}
 	r.running = false
 	return nil

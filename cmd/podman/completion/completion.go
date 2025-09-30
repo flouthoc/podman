@@ -6,14 +6,14 @@ import (
 	"os"
 	"strings"
 
-	commonComp "github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/registry"
 	"github.com/spf13/cobra"
+	commonComp "go.podman.io/common/pkg/completion"
 )
 
 const (
 	completionDescription = `Generate shell autocompletions.
-  Valid arguments are bash, zsh, and fish.
+  Valid arguments are bash, zsh, fish, and powershell.
   Please refer to the man page to see how you can load these completions.`
 )
 
@@ -26,12 +26,12 @@ var (
 		Short:     "Generate shell autocompletions",
 		Long:      completionDescription,
 		ValidArgs: shells,
-		Args:      cobra.ExactValidArgs(1),
+		Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 		RunE:      completion,
 		Example: `podman completion bash
   podman completion zsh -f _podman
   podman completion fish --no-desc`,
-		//don't show this command to users
+		// don't show this command to users
 		Hidden: true,
 	}
 )

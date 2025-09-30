@@ -1,8 +1,8 @@
 package images
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +27,7 @@ func init() {
 }
 
 func exists(cmd *cobra.Command, args []string) error {
-	found, err := registry.ImageEngine().Exists(registry.GetContext(), args[0])
+	found, err := registry.ImageEngine().Exists(registry.Context(), args[0])
 	if err != nil {
 		return err
 	}

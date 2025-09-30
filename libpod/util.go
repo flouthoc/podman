@@ -1,41 +1,31 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
-	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/utils"
-	"github.com/cri-o/ocicni/pkg/ocicni"
-	"github.com/fsnotify/fsnotify"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils/apiutil"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux/label"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/storage/pkg/fileutils"
+	"golang.org/x/sys/unix"
 )
-
-// Runtime API constants
-const (
-	unknownPackage = "Unknown"
-)
-
-// FuncTimer helps measure the execution time of a function
-// For debug purposes, do not leave in code
-// used like defer FuncTimer("foo")
-func FuncTimer(funcName string) {
-	elapsed := time.Since(time.Now())
-	fmt.Printf("%s executed in %d ms\n", funcName, elapsed)
-}
 
 // MountExists returns true if dest exists in the list of mounts
 func MountExists(specMounts []spec.Mount, dest string) bool {
@@ -47,147 +37,39 @@ func MountExists(specMounts []spec.Mount, dest string) bool {
 	return false
 }
 
-// WaitForFile waits until a file has been created or the given timeout has occurred
-func WaitForFile(path string, chWait chan error, timeout time.Duration) (bool, error) {
-	var inotifyEvents chan fsnotify.Event
-	watcher, err := fsnotify.NewWatcher()
-	if err == nil {
-		if err := watcher.Add(filepath.Dir(path)); err == nil {
-			inotifyEvents = watcher.Events
-		}
-		defer watcher.Close()
+func parts(m spec.Mount) int {
+	// We must special case a root mount /.
+	// The count of "/" and "/proc" are both 1 but of course logically "/" must
+	// be mounted before "/proc" as such set the count to 0.
+	if m.Destination == "/" {
+		return 0
 	}
-
-	var timeoutChan <-chan time.Time
-
-	if timeout != 0 {
-		timeoutChan = time.After(timeout)
-	}
-
-	for {
-		select {
-		case e := <-chWait:
-			return true, e
-		case <-inotifyEvents:
-			_, err := os.Stat(path)
-			if err == nil {
-				return false, nil
-			}
-			if !os.IsNotExist(err) {
-				return false, err
-			}
-		case <-time.After(25 * time.Millisecond):
-			// Check periodically for the file existence.  It is needed
-			// if the inotify watcher could not have been created.  It is
-			// also useful when using inotify as if for any reasons we missed
-			// a notification, we won't hang the process.
-			_, err := os.Stat(path)
-			if err == nil {
-				return false, nil
-			}
-			if !os.IsNotExist(err) {
-				return false, err
-			}
-		case <-timeoutChan:
-			return false, errors.Wrapf(define.ErrInternal, "timed out waiting for file %s", path)
-		}
-	}
-}
-
-type byDestination []spec.Mount
-
-func (m byDestination) Len() int {
-	return len(m)
-}
-
-func (m byDestination) Less(i, j int) bool {
-	return m.parts(i) < m.parts(j)
-}
-
-func (m byDestination) Swap(i, j int) {
-	m[i], m[j] = m[j], m[i]
-}
-
-func (m byDestination) parts(i int) int {
-	return strings.Count(filepath.Clean(m[i].Destination), string(os.PathSeparator))
+	return strings.Count(filepath.Clean(m.Destination), string(os.PathSeparator))
 }
 
 func sortMounts(m []spec.Mount) []spec.Mount {
-	sort.Sort(byDestination(m))
+	slices.SortStableFunc(m, func(a, b spec.Mount) int {
+		aLen := parts(a)
+		bLen := parts(b)
+		if aLen < bLen {
+			return -1
+		}
+		if aLen == bLen {
+			return 0
+		}
+		return 1
+	})
 	return m
-}
-
-func validPodNSOption(p *Pod, ctrPod string) error {
-	if p == nil {
-		return errors.Wrapf(define.ErrInvalidArg, "pod passed in was nil. Container may not be associated with a pod")
-	}
-
-	if ctrPod == "" {
-		return errors.Wrapf(define.ErrInvalidArg, "container is not a member of any pod")
-	}
-
-	if ctrPod != p.ID() {
-		return errors.Wrapf(define.ErrInvalidArg, "pod passed in is not the pod the container is associated with")
-	}
-	return nil
 }
 
 // JSONDeepCopy performs a deep copy by performing a JSON encode/decode of the
 // given structures. From and To should be identically typed structs.
-func JSONDeepCopy(from, to interface{}) error {
+func JSONDeepCopy(from, to any) error {
 	tmp, err := json.Marshal(from)
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(tmp, to)
-}
-
-func queryPackageVersion(cmdArg ...string) string {
-	output := unknownPackage
-	if 1 < len(cmdArg) {
-		cmd := exec.Command(cmdArg[0], cmdArg[1:]...)
-		if outp, err := cmd.Output(); err == nil {
-			output = string(outp)
-		}
-	}
-	return strings.Trim(output, "\n")
-}
-
-func equeryVersion(path string) string {
-	return queryPackageVersion("/usr/bin/equery", "b", path)
-}
-
-func pacmanVersion(path string) string {
-	return queryPackageVersion("/usr/bin/pacman", "-Qo", path)
-}
-
-func dpkgVersion(path string) string {
-	return queryPackageVersion("/usr/bin/dpkg", "-S", path)
-}
-
-func rpmVersion(path string) string {
-	return queryPackageVersion("/usr/bin/rpm", "-q", "-f", path)
-}
-
-func packageVersion(program string) string {
-	if out := rpmVersion(program); out != unknownPackage {
-		return out
-	}
-	if out := dpkgVersion(program); out != unknownPackage {
-		return out
-	}
-	if out := pacmanVersion(program); out != unknownPackage {
-		return out
-	}
-	return equeryVersion(program)
-}
-
-func programVersion(mountProgram string) (string, error) {
-	output, err := utils.ExecCmd(mountProgram, "--version")
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(output, "\n"), nil
 }
 
 // DefaultSeccompPath returns the path to the default seccomp.json file
@@ -202,14 +84,14 @@ func DefaultSeccompPath() (string, error) {
 		return def.Containers.SeccompProfile, nil
 	}
 
-	_, err = os.Stat(config.SeccompOverridePath)
+	err = fileutils.Exists(config.SeccompOverridePath)
 	if err == nil {
 		return config.SeccompOverridePath, nil
 	}
 	if !os.IsNotExist(err) {
 		return "", err
 	}
-	if _, err := os.Stat(config.SeccompDefaultPath); err != nil {
+	if err := fileutils.Exists(config.SeccompDefaultPath); err != nil {
 		if !os.IsNotExist(err) {
 			return "", err
 		}
@@ -226,18 +108,18 @@ func DefaultSeccompPath() (string, error) {
 func checkDependencyContainer(depCtr, ctr *Container) error {
 	state, err := depCtr.State()
 	if err != nil {
-		return errors.Wrapf(err, "error accessing dependency container %s state", depCtr.ID())
+		return fmt.Errorf("accessing dependency container %s state: %w", depCtr.ID(), err)
 	}
 	if state == define.ContainerStateRemoving {
-		return errors.Wrapf(define.ErrCtrStateInvalid, "cannot use container %s as a dependency as it is being removed", depCtr.ID())
+		return fmt.Errorf("cannot use container %s as a dependency as it is being removed: %w", depCtr.ID(), define.ErrCtrStateInvalid)
 	}
 
 	if depCtr.ID() == ctr.ID() {
-		return errors.Wrapf(define.ErrInvalidArg, "must specify another container")
+		return fmt.Errorf("must specify another container: %w", define.ErrInvalidArg)
 	}
 
 	if ctr.config.Pod != "" && depCtr.PodID() != ctr.config.Pod {
-		return errors.Wrapf(define.ErrInvalidArg, "container has joined pod %s and dependency container %s is not a member of the pod", ctr.config.Pod, depCtr.ID())
+		return fmt.Errorf("container has joined pod %s and dependency container %s is not a member of the pod: %w", ctr.config.Pod, depCtr.ID(), define.ErrInvalidArg)
 	}
 
 	return nil
@@ -245,20 +127,20 @@ func checkDependencyContainer(depCtr, ctr *Container) error {
 
 // hijackWriteError writes an error to a hijacked HTTP session.
 func hijackWriteError(toWrite error, cid string, terminal bool, httpBuf *bufio.ReadWriter) {
-	if toWrite != nil {
-		errString := []byte(fmt.Sprintf("Error: %v\n", toWrite))
+	if toWrite != nil && !errors.Is(toWrite, define.ErrDetach) {
+		errString := fmt.Appendf(nil, "Error: %v\n", toWrite)
 		if !terminal {
 			// We need a header.
 			header := makeHTTPAttachHeader(2, uint32(len(errString)))
 			if _, err := httpBuf.Write(header); err != nil {
-				logrus.Errorf("Error writing header for container %s attach connection error: %v", cid, err)
+				logrus.Errorf("Writing header for container %s attach connection error: %v", cid, err)
 			}
 		}
 		if _, err := httpBuf.Write(errString); err != nil {
-			logrus.Errorf("Error writing error to container %s HTTP attach connection: %v", cid, err)
+			logrus.Errorf("Writing error to container %s HTTP attach connection: %v", cid, err)
 		}
 		if err := httpBuf.Flush(); err != nil {
-			logrus.Errorf("Error flushing HTTP buffer for container %s HTTP attach connection: %v", cid, err)
+			logrus.Errorf("Flushing HTTP buffer for container %s HTTP attach connection: %v", cid, err)
 		}
 	}
 }
@@ -270,7 +152,7 @@ func hijackWriteErrorAndClose(toWrite error, cid string, terminal bool, httpCon 
 	hijackWriteError(toWrite, cid, terminal, httpBuf)
 
 	if err := httpCon.Close(); err != nil {
-		logrus.Errorf("Error closing container %s HTTP attach connection: %v", cid, err)
+		logrus.Errorf("Closing container %s HTTP attach connection: %v", cid, err)
 	}
 }
 
@@ -286,41 +168,73 @@ func makeHTTPAttachHeader(stream byte, length uint32) []byte {
 
 // writeHijackHeader writes a header appropriate for the type of HTTP Hijack
 // that occurred in a hijacked HTTP connection used for attach.
-func writeHijackHeader(r *http.Request, conn io.Writer) {
+func writeHijackHeader(r *http.Request, conn io.Writer, tty bool) {
 	// AttachHeader is the literal header sent for upgraded/hijacked connections for
 	// attach, sourced from Docker at:
 	// https://raw.githubusercontent.com/moby/moby/b95fad8e51bd064be4f4e58a996924f343846c85/api/server/router/container/container_routes.go
 	// Using literally to ensure compatibility with existing clients.
+
+	// New docker API uses a different header for the non tty case.
+	// Lets do the same for libpod. Only do this for the new api versions to not break older clients.
+	header := "application/vnd.docker.raw-stream"
+	if !tty {
+		version := "4.7.0"
+		if !apiutil.IsLibpodRequest(r) {
+			version = "1.42.0" // docker only used two digest "1.42" but our semver lib needs the extra .0 to work
+		}
+		if _, err := apiutil.SupportedVersion(r, ">= "+version); err == nil {
+			header = "application/vnd.docker.multiplexed-stream"
+		}
+	}
+
 	c := r.Header.Get("Connection")
 	proto := r.Header.Get("Upgrade")
 	if len(proto) == 0 || !strings.EqualFold(c, "Upgrade") {
 		// OK - can't upgrade if not requested or protocol is not specified
 		fmt.Fprintf(conn,
-			"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n")
+			"HTTP/1.1 200 OK\r\nContent-Type: %s\r\n\r\n", header)
 	} else {
 		// Upgraded
 		fmt.Fprintf(conn,
-			"HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n",
-			proto)
+			"HTTP/1.1 101 UPGRADED\r\nContent-Type: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\n\r\n",
+			header, proto)
 	}
 }
 
-// Convert OCICNI port bindings into Inspect-formatted port bindings.
-func makeInspectPortBindings(bindings []ocicni.PortMapping) map[string][]define.InspectHostPort {
+// Generate inspect-formatted port mappings from the format used in our config file
+func makeInspectPortBindings(bindings []types.PortMapping) map[string][]define.InspectHostPort {
 	portBindings := make(map[string][]define.InspectHostPort)
 	for _, port := range bindings {
-		key := fmt.Sprintf("%d/%s", port.ContainerPort, port.Protocol)
-		hostPorts := portBindings[key]
-		if hostPorts == nil {
-			hostPorts = []define.InspectHostPort{}
+		for protocol := range strings.SplitSeq(port.Protocol, ",") {
+			for i := uint16(0); i < port.Range; i++ {
+				key := fmt.Sprintf("%d/%s", port.ContainerPort+i, protocol)
+				hostPorts := portBindings[key]
+				var hostIP = port.HostIP
+				if len(port.HostIP) == 0 {
+					hostIP = "0.0.0.0"
+				}
+				hostPorts = append(hostPorts, define.InspectHostPort{
+					HostIP:   hostIP,
+					HostPort: strconv.FormatUint(uint64(port.HostPort+i), 10),
+				})
+				portBindings[key] = hostPorts
+			}
 		}
-		hostPorts = append(hostPorts, define.InspectHostPort{
-			HostIP:   port.HostIP,
-			HostPort: fmt.Sprintf("%d", port.HostPort),
-		})
-		portBindings[key] = hostPorts
 	}
+
 	return portBindings
+}
+
+// Add exposed ports to inspect port bindings. These must be done on a per-container basis, not per-netns basis.
+func addInspectPortsExpose(expose map[uint16][]string, portBindings map[string][]define.InspectHostPort) {
+	for port, protocols := range expose {
+		for _, protocol := range protocols {
+			key := fmt.Sprintf("%d/%s", port, protocol)
+			if _, ok := portBindings[key]; !ok {
+				portBindings[key] = nil
+			}
+		}
+	}
 }
 
 // Write a given string to a new file at a given path.
@@ -330,7 +244,7 @@ func makeInspectPortBindings(bindings []ocicni.PortMapping) map[string][]define.
 func writeStringToPath(path, contents, mountLabel string, uid, gid int) error {
 	f, err := os.Create(path)
 	if err != nil {
-		return errors.Wrapf(err, "unable to create %s", path)
+		return fmt.Errorf("unable to create %s: %w", path, err)
 	}
 	defer f.Close()
 	if err := f.Chown(uid, gid); err != nil {
@@ -338,12 +252,43 @@ func writeStringToPath(path, contents, mountLabel string, uid, gid int) error {
 	}
 
 	if _, err := f.WriteString(contents); err != nil {
-		return errors.Wrapf(err, "unable to write %s", path)
+		return fmt.Errorf("unable to write %s: %w", path, err)
 	}
 	// Relabel runDirResolv for the container
 	if err := label.Relabel(path, mountLabel, false); err != nil {
+		if errors.Is(err, unix.ENOTSUP) {
+			logrus.Debugf("Labeling not supported on %q", path)
+			return nil
+		}
 		return err
 	}
 
 	return nil
+}
+
+// If the given path exists, evaluate any symlinks in it. If it does not, clean
+// the path and return it. Used to try and verify path equality in a somewhat
+// sane fashion.
+func evalSymlinksIfExists(toCheck string) (string, error) {
+	checkedVal, err := filepath.EvalSymlinks(toCheck)
+	if err != nil {
+		// If the error is not ENOENT, something more serious has gone
+		// wrong, return it.
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		// This is an ENOENT. On ENOENT, EvalSymlinks returns "".
+		// We don't want that. Return a cleaned version of the original
+		// path.
+		return filepath.Clean(toCheck), nil
+	}
+	return checkedVal, nil
+}
+
+func isDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }

@@ -3,6 +3,9 @@ package define
 import (
 	"errors"
 	"fmt"
+
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/detach"
 )
 
 var (
@@ -16,11 +19,15 @@ var (
 	ErrNoSuchVolume = errors.New("no such volume")
 
 	// ErrNoSuchNetwork indicates the requested network does not exist
-	ErrNoSuchNetwork = errors.New("network not found")
+	ErrNoSuchNetwork = types.ErrNoSuchNetwork
 
 	// ErrNoSuchExecSession indicates that the requested exec session does
 	// not exist.
 	ErrNoSuchExecSession = errors.New("no such exec session")
+
+	// ErrNoSuchExitCode indicates that the requested container exit code
+	// does not exist.
+	ErrNoSuchExitCode = errors.New("no such exit code")
 
 	// ErrDepExists indicates that the current object has dependencies and
 	// cannot be removed before them.
@@ -48,11 +55,13 @@ var (
 	ErrExecSessionExists = errors.New("exec session already exists")
 	// ErrNetworkExists indicates that a network with the given name already
 	// exists.
-	ErrNetworkExists = errors.New("network already exists")
+	ErrNetworkExists = types.ErrNetworkExists
 
 	// ErrCtrStateInvalid indicates a container is in an improper state for
 	// the requested operation
 	ErrCtrStateInvalid = errors.New("container state improper")
+	// ErrCtrStateRunning indicates a container is running.
+	ErrCtrStateRunning = errors.New("container is running")
 	// ErrExecSessionStateInvalid indicates that an exec session is in an
 	// improper state for the requested operation
 	ErrExecSessionStateInvalid = errors.New("exec session state improper")
@@ -73,7 +82,7 @@ var (
 	ErrVolumeFinalized = errors.New("volume has been finalized")
 
 	// ErrInvalidArg indicates that an invalid argument was passed
-	ErrInvalidArg = errors.New("invalid argument")
+	ErrInvalidArg = types.ErrInvalidArg
 	// ErrEmptyID indicates that an empty ID was passed
 	ErrEmptyID = errors.New("name or ID cannot be empty")
 
@@ -86,7 +95,7 @@ var (
 
 	// ErrDetach indicates that an attach session was manually detached by
 	// the user.
-	ErrDetach = errors.New("detached from container")
+	ErrDetach = detach.ErrDetach
 
 	// ErrWillDeadlock indicates that the requested operation will cause a
 	// deadlock. This is usually caused by upgrade issues, and is resolved
@@ -94,7 +103,7 @@ var (
 	ErrWillDeadlock = errors.New("deadlock due to lock mismatch")
 
 	// ErrNoCgroups indicates that the container does not have its own
-	// CGroup.
+	// Cgroup.
 	ErrNoCgroups = errors.New("this container does not have a cgroup")
 	// ErrNoLogs indicates that this container is not creating a log so log
 	// operations cannot be performed on it
@@ -172,6 +181,9 @@ var (
 	// ErrNetworkInUse indicates the requested operation failed because the network was in use
 	ErrNetworkInUse = errors.New("network is being used")
 
+	// ErrNetworkConnected indicates that the required operation failed because the container is already a network endpoint
+	ErrNetworkConnected = errors.New("network is already connected")
+
 	// ErrStoreNotInitialized indicates that the container storage was never
 	// initialized.
 	ErrStoreNotInitialized = errors.New("the container storage was never initialized")
@@ -198,7 +210,14 @@ var (
 	// Useful for potentially long running tasks.
 	ErrCanceled = errors.New("cancelled by user")
 
-	// ErrConmonVersionFormat is used when the expected versio-format of conmon
+	// ErrConmonVersionFormat is used when the expected version format of conmon
 	// has changed.
 	ErrConmonVersionFormat = "conmon version changed format"
+
+	// ErrRemovingCtrs indicates that there was an error removing all
+	// containers from a pod.
+	ErrRemovingCtrs = errors.New("removing pod containers")
+
+	// ErrHealthCheckTimeout indicates that a HealthCheck timed out.
+	ErrHealthCheckTimeout = errors.New("healthcheck command exceeded timeout")
 )

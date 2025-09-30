@@ -1,10 +1,10 @@
 package reversereader
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
-
-	"github.com/pkg/errors"
 )
 
 // ReverseReader structure for reading a file backwards
@@ -16,7 +16,7 @@ type ReverseReader struct {
 
 // NewReverseReader returns a reader that reads from the end of a file
 // rather than the beginning.  It sets the readsize to pagesize and determines
-// the first offset using using modulus.
+// the first offset using modulus.
 func NewReverseReader(reader *os.File) (*ReverseReader, error) {
 	// pagesize should be safe for memory use and file reads should be on page
 	// boundaries as well
@@ -33,10 +33,7 @@ func NewReverseReader(reader *os.File) (*ReverseReader, error) {
 	}
 	// set offset (starting position) to the last page boundary or
 	// zero if fits in one page
-	startOffset := end - remainder
-	if startOffset < 0 {
-		startOffset = 0
-	}
+	startOffset := max(end-remainder, 0)
 	rr := ReverseReader{
 		reader:   reader,
 		offset:   startOffset,
@@ -49,18 +46,15 @@ func NewReverseReader(reader *os.File) (*ReverseReader, error) {
 // then sets the newoff set one pagesize less than the previous read.
 func (r *ReverseReader) Read() (string, error) {
 	if r.offset < 0 {
-		return "", errors.Wrap(io.EOF, "at beginning of file")
+		return "", fmt.Errorf("at beginning of file: %w", io.EOF)
 	}
 	// Read from given offset
 	b := make([]byte, r.readSize)
 	n, err := r.reader.ReadAt(b, r.offset)
-	if err != nil && errors.Cause(err) != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
-	}
-	if int64(n) < r.readSize {
-		b = b[0:n]
 	}
 	// Move the offset one pagesize up
 	r.offset -= r.readSize
-	return string(b), nil
+	return string(b[:n]), nil
 }

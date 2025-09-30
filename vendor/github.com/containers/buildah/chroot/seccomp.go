@@ -1,10 +1,11 @@
-// +build linux,seccomp
+//go:build linux && seccomp
 
 package chroot
 
 import (
+	"fmt"
+
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
 	libseccomp "github.com/seccomp/libseccomp-golang"
 	"github.com/sirupsen/logrus"
 )
@@ -18,7 +19,7 @@ func setSeccomp(spec *specs.Spec) error {
 	mapAction := func(specAction specs.LinuxSeccompAction, errnoRet *uint) libseccomp.ScmpAction {
 		switch specAction {
 		case specs.ActKill:
-			return libseccomp.ActKill
+			return libseccomp.ActKillThread
 		case specs.ActTrap:
 			return libseccomp.ActTrap
 		case specs.ActErrno:
@@ -75,9 +76,11 @@ func setSeccomp(spec *specs.Spec) error {
 		case specs.ArchS390X:
 			return libseccomp.ArchS390X
 		case specs.ArchPARISC:
-			/* fallthrough */ /* for now */
+			return libseccomp.ArchPARISC
 		case specs.ArchPARISC64:
-			/* fallthrough */ /* for now */
+			return libseccomp.ArchPARISC64
+		case specs.ArchRISCV64:
+			return libseccomp.ArchRISCV64
 		default:
 			logrus.Errorf("unmappable arch %v", specArch)
 		}
@@ -105,13 +108,13 @@ func setSeccomp(spec *specs.Spec) error {
 		return libseccomp.CompareInvalid
 	}
 
-	filter, err := libseccomp.NewFilter(mapAction(spec.Linux.Seccomp.DefaultAction, nil))
+	filter, err := libseccomp.NewFilter(mapAction(spec.Linux.Seccomp.DefaultAction, spec.Linux.Seccomp.DefaultErrnoRet))
 	if err != nil {
-		return errors.Wrapf(err, "error creating seccomp filter with default action %q", spec.Linux.Seccomp.DefaultAction)
+		return fmt.Errorf("creating seccomp filter with default action %q: %w", spec.Linux.Seccomp.DefaultAction, err)
 	}
 	for _, arch := range spec.Linux.Seccomp.Architectures {
 		if err = filter.AddArch(mapArch(arch)); err != nil {
-			return errors.Wrapf(err, "error adding architecture %q(%q) to seccomp filter", arch, mapArch(arch))
+			return fmt.Errorf("adding architecture %q(%q) to seccomp filter: %w", arch, mapArch(arch), err)
 		}
 	}
 	for _, rule := range spec.Linux.Seccomp.Syscalls {
@@ -127,7 +130,7 @@ func setSeccomp(spec *specs.Spec) error {
 		for scnum := range scnames {
 			if len(rule.Args) == 0 {
 				if err = filter.AddRule(scnum, mapAction(rule.Action, rule.ErrnoRet)); err != nil {
-					return errors.Wrapf(err, "error adding a rule (%q:%q) to seccomp filter", scnames[scnum], rule.Action)
+					return fmt.Errorf("adding a rule (%q:%q) to seccomp filter: %w", scnames[scnum], rule.Action, err)
 				}
 				continue
 			}
@@ -136,7 +139,7 @@ func setSeccomp(spec *specs.Spec) error {
 			for _, arg := range rule.Args {
 				condition, err := libseccomp.MakeCondition(arg.Index, mapOp(arg.Op), arg.Value, arg.ValueTwo)
 				if err != nil {
-					return errors.Wrapf(err, "error building a seccomp condition %d:%v:%d:%d", arg.Index, arg.Op, arg.Value, arg.ValueTwo)
+					return fmt.Errorf("building a seccomp condition %d:%v:%d:%d: %w", arg.Index, arg.Op, arg.Value, arg.ValueTwo, err)
 				}
 				if arg.Op != specs.OpEqualTo {
 					opsAreAllEquality = false
@@ -152,22 +155,22 @@ func setSeccomp(spec *specs.Spec) error {
 				if len(rule.Args) > 1 && opsAreAllEquality && err.Error() == "two checks on same syscall argument" {
 					for i := range conditions {
 						if err = filter.AddRuleConditional(scnum, mapAction(rule.Action, rule.ErrnoRet), conditions[i:i+1]); err != nil {
-							return errors.Wrapf(err, "error adding a conditional rule (%q:%q[%d]) to seccomp filter", scnames[scnum], rule.Action, i)
+							return fmt.Errorf("adding a conditional rule (%q:%q[%d]) to seccomp filter: %w", scnames[scnum], rule.Action, i, err)
 						}
 					}
 				} else {
-					return errors.Wrapf(err, "error adding a conditional rule (%q:%q) to seccomp filter", scnames[scnum], rule.Action)
+					return fmt.Errorf("adding a conditional rule (%q:%q) to seccomp filter: %w", scnames[scnum], rule.Action, err)
 				}
 			}
 		}
 	}
 	if err = filter.SetNoNewPrivsBit(spec.Process.NoNewPrivileges); err != nil {
-		return errors.Wrapf(err, "error setting no-new-privileges bit to %v", spec.Process.NoNewPrivileges)
+		return fmt.Errorf("setting no-new-privileges bit to %v: %w", spec.Process.NoNewPrivileges, err)
 	}
 	err = filter.Load()
 	filter.Release()
 	if err != nil {
-		return errors.Wrapf(err, "error activating seccomp filter")
+		return fmt.Errorf("activating seccomp filter: %w", err)
 	}
 	return nil
 }

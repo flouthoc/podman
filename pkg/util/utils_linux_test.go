@@ -2,28 +2,53 @@ package util
 
 import (
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestGetImageConfigStopSignal(t *testing.T) {
-	// Linux-only because parsing signal names is not supported on non-Linux systems by
-	// pkg/signal.
-	stopSignalValidInt, err := GetImageConfig([]string{"STOPSIGNAL 9"})
-	require.Nil(t, err)
-	assert.Equal(t, stopSignalValidInt.StopSignal, "9")
+func TestIsVirtualConsoleDevice(t *testing.T) {
+	testcases := []struct {
+		expectedResult bool
+		path           string
+	}{
+		{
+			expectedResult: true,
+			path:           "/dev/tty10",
+		},
+		{
+			expectedResult: false,
+			path:           "/dev/tty",
+		},
+		{
+			expectedResult: false,
+			path:           "/dev/ttyUSB0",
+		},
+		{
+			expectedResult: false,
+			path:           "/dev/tty0abcd",
+		},
+		{
+			expectedResult: false,
+			path:           "1234",
+		},
+		{
+			expectedResult: false,
+			path:           "abc",
+		},
+		{
+			expectedResult: false,
+			path:           " ",
+		},
+		{
+			expectedResult: false,
+			path:           "",
+		},
+	}
 
-	stopSignalValidString, err := GetImageConfig([]string{"STOPSIGNAL SIGKILL"})
-	require.Nil(t, err)
-	assert.Equal(t, stopSignalValidString.StopSignal, "9")
-
-	_, err = GetImageConfig([]string{"STOPSIGNAL 0"})
-	assert.NotNil(t, err)
-
-	_, err = GetImageConfig([]string{"STOPSIGNAL garbage"})
-	assert.NotNil(t, err)
-
-	_, err = GetImageConfig([]string{"STOPSIGNAL "})
-	assert.NotNil(t, err)
+	for _, tc := range testcases {
+		t.Run(tc.path, func(t *testing.T) {
+			result := isVirtualConsoleDevice(tc.path)
+			if result != tc.expectedResult {
+				t.Errorf("isVirtualConsoleDevice returned %t, expected %t", result, tc.expectedResult)
+			}
+		})
+	}
 }

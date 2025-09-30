@@ -1,6 +1,9 @@
+//go:build !remote
+
 package idle
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -31,15 +34,18 @@ func NewTracker(idle time.Duration) *Tracker {
 }
 
 // ConnState is called on HTTP connection state changes.
-// - Once StateHijacked, StateClose is _NOT_ called on that connection
-// - There are two "idle" timeouts, the http idle connection (not to be confused with the TCP/IP idle socket timeout)
-//   and the API idle window.  The caller should set the http idle timeout to 2x the time provided to NewTacker() which
-//   is the API idle window.
+//   - Once StateHijacked, StateClose is _NOT_ called on that connection
+//   - There are two "idle" timeouts, the http idle connection (not to be confused with the TCP/IP idle socket timeout)
+//     and the API idle window.  The caller should set the http idle timeout to 2x the time provided to NewTacker() which
+//     is the API idle window.
 func (t *Tracker) ConnState(conn net.Conn, state http.ConnState) {
 	t.mux.Lock()
 	defer t.mux.Unlock()
 
-	logrus.Debugf("IdleTracker %p:%v %dm+%dh/%dt connection(s)", conn, state, len(t.managed), t.hijacked, t.TotalConnections())
+	logrus.WithFields(logrus.Fields{
+		"X-Reference-Id": fmt.Sprintf("%p", conn),
+	}).Debugf("IdleTracker:%v %dm+%dh/%dt connection(s)", state, len(t.managed), t.hijacked, t.TotalConnections())
+
 	switch state {
 	case http.StateNew:
 		t.total++
@@ -68,7 +74,9 @@ func (t *Tracker) ConnState(conn net.Conn, state http.ConnState) {
 			if _, found := t.managed[conn]; found {
 				delete(t.managed, conn)
 			} else {
-				logrus.Warnf("IdleTracker %p: StateClosed transition by un-managed connection", conn)
+				logrus.WithFields(logrus.Fields{
+					"X-Reference-Id": fmt.Sprintf("%p", conn),
+				}).Warnf("IdleTracker: StateClosed transition by connection marked un-managed")
 			}
 		}
 

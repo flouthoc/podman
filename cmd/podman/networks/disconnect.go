@@ -1,9 +1,9 @@
 package network
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -12,7 +12,7 @@ var (
 	networkDisconnectDescription = `Remove container from a network`
 	networkDisconnectCommand     = &cobra.Command{
 		Use:               "disconnect [options] NETWORK CONTAINER",
-		Short:             "network rm",
+		Short:             "Disconnect a container from a network",
 		Long:              networkDisconnectDescription,
 		RunE:              networkDisconnect,
 		Example:           `podman network disconnect web secondary`,

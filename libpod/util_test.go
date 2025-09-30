@@ -1,18 +1,69 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"testing"
 
-	"github.com/containers/podman/v3/utils"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRemoveScientificNotationFromFloat(t *testing.T) {
-	numbers := []float64{0.0, .5, 1.99999932, 1.04e+10}
-	results := []float64{0.0, .5, 1.99999932, 1.04}
-	for i, x := range numbers {
-		result, err := utils.RemoveScientificNotationFromFloat(x)
-		assert.NoError(t, err)
-		assert.Equal(t, result, results[i])
+func Test_sortMounts(t *testing.T) {
+	tests := []struct {
+		name string
+		args []spec.Mount
+		want []spec.Mount
+	}{
+		{
+			name: "simple nested mounts",
+			args: []spec.Mount{
+				{
+					Destination: "/abc/123",
+				},
+				{
+					Destination: "/abc",
+				},
+			},
+			want: []spec.Mount{
+				{
+					Destination: "/abc",
+				},
+				{
+					Destination: "/abc/123",
+				},
+			},
+		},
+		{
+			name: "root mount",
+			args: []spec.Mount{
+				{
+					Destination: "/abc",
+				},
+				{
+					Destination: "/",
+				},
+				{
+					Destination: "/def",
+				},
+			},
+			want: []spec.Mount{
+				{
+					Destination: "/",
+				},
+				{
+					Destination: "/abc",
+				},
+				{
+					Destination: "/def",
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sortMounts(tt.args)
+			assert.Equal(t, tt.want, got)
+		})
 	}
 }

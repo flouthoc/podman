@@ -1,4 +1,4 @@
-// +build linux
+//go:build !remote
 
 package libpod
 
@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/rootless"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/psgo"
 )
 
@@ -45,14 +45,14 @@ func (p *Pod) GetPodPidInformation(descriptors []string) ([]string, error) {
 	// Also support comma-separated input.
 	psgoDescriptors := []string{}
 	for _, d := range descriptors {
-		for _, s := range strings.Split(d, ",") {
+		for s := range strings.SplitSeq(d, ",") {
 			if s != "" {
 				psgoDescriptors = append(psgoDescriptors, s)
 			}
 		}
 	}
 
-	// TODO: psgo returns a [][]string to give users the ability to apply
+	// NOTE: psgo returns a [][]string to give users the ability to apply
 	//       filters on the data.  We need to change the API here to return
 	//       a [][]string if we want to make use of filtering.
 	opts := psgo.JoinNamespaceOpts{FillMappings: rootless.IsRootless()}

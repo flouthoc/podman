@@ -3,14 +3,14 @@ package images
 import (
 	"fmt"
 
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
 var (
-	treeDescription = "Prints layer hierarchy of an image in a tree format"
+	treeDescription = "Print layer hierarchy of an image in a tree format"
 	treeCmd         = &cobra.Command{
 		Use:               "tree [options] IMAGE",
 		Args:              cobra.ExactArgs(1),

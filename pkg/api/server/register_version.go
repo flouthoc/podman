@@ -1,9 +1,11 @@
+//go:build !remote
+
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/api/handlers/compat"
+	"github.com/containers/podman/v5/pkg/api/handlers/compat"
 	"github.com/gorilla/mux"
 )
 
@@ -17,7 +19,7 @@ func (s *APIServer) registerVersionHandlers(r *mux.Router) error {
 	// - application/json
 	// responses:
 	//   200:
-	//    $ref: "#/responses/Version"
+	//    $ref: "#/responses/versionResponse"
 	r.Handle("/version", s.APIHandler(compat.VersionHandler)).Methods(http.MethodGet)
 	r.Handle(VersionedPath("/version"), s.APIHandler(compat.VersionHandler)).Methods(http.MethodGet)
 	// swagger:operation GET /libpod/version libpod SystemVersionLibpod
@@ -29,7 +31,7 @@ func (s *APIServer) registerVersionHandlers(r *mux.Router) error {
 	// - application/json
 	// responses:
 	//   200:
-	//    $ref: "#/responses/Version"
+	//    $ref: "#/responses/versionResponse"
 	r.Handle(VersionedPath("/libpod/version"), s.APIHandler(compat.VersionHandler)).Methods(http.MethodGet)
 	return nil
 }

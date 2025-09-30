@@ -1,4 +1,4 @@
-// +build static
+//go:build static
 
 package linkmode
 

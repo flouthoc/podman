@@ -1,25 +1,31 @@
-// +build amd64,linux arm64,linux amd64,darwin arm64,darwin
+//go:build amd64 || arm64
 
 package machine
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/machine"
-	"github.com/containers/podman/v3/pkg/machine/qemu"
-	"github.com/pkg/errors"
+	"fmt"
+
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/libpod/events"
+	"github.com/containers/podman/v5/pkg/machine"
+	"github.com/containers/podman/v5/pkg/machine/env"
+	"github.com/containers/podman/v5/pkg/machine/shim"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/spf13/cobra"
 )
 
 var (
 	startCmd = &cobra.Command{
-		Use:               "start [MACHINE]",
+		Use:               "start [options] [MACHINE]",
 		Short:             "Start an existing machine",
 		Long:              "Start a managed virtual machine ",
+		PersistentPreRunE: machinePreRunE,
 		RunE:              start,
 		Args:              cobra.MaximumNArgs(1),
-		Example:           `podman machine start myvm`,
+		Example:           `podman machine start podman-machine-default`,
 		ValidArgsFunction: autocompleteMachine,
 	}
+	startOpts = machine.StartOptions{}
 )
 
 func init() {
@@ -27,36 +33,44 @@ func init() {
 		Command: startCmd,
 		Parent:  machineCmd,
 	})
+
+	flags := startCmd.Flags()
+	noInfoFlagName := "no-info"
+	flags.BoolVar(&startOpts.NoInfo, noInfoFlagName, false, "Suppress informational tips")
+
+	quietFlagName := "quiet"
+	flags.BoolVarP(&startOpts.Quiet, quietFlagName, "q", false, "Suppress machine starting status output")
 }
 
-func start(cmd *cobra.Command, args []string) error {
+func start(_ *cobra.Command, args []string) error {
 	var (
-		err    error
-		vm     machine.VM
-		vmType string
+		err error
 	)
+
+	startOpts.NoInfo = startOpts.Quiet || startOpts.NoInfo
+
 	vmName := defaultMachineName
 	if len(args) > 0 && len(args[0]) > 0 {
 		vmName = args[0]
 	}
 
-	// We only have qemu VM's for now
-	active, activeName, err := qemu.CheckActiveVM()
+	dirs, err := env.GetMachineDirs(provider.VMType())
 	if err != nil {
 		return err
 	}
-	if active {
-		if vmName == activeName {
-			return errors.Wrapf(machine.ErrVMAlreadyRunning, "cannot start VM %s", vmName)
-		}
-		return errors.Wrapf(machine.ErrMultipleActiveVM, "cannot start VM %s. VM %s is currently running", vmName, activeName)
-	}
-	switch vmType {
-	default:
-		vm, err = qemu.LoadVMByName(vmName)
-	}
+	mc, err := vmconfigs.LoadMachineByName(vmName, dirs)
 	if err != nil {
 		return err
 	}
-	return vm.Start(vmName, machine.StartOptions{})
+
+	if !startOpts.Quiet {
+		fmt.Printf("Starting machine %q\n", vmName)
+	}
+
+	if err := shim.Start(mc, provider, dirs, startOpts); err != nil {
+		return err
+	}
+	fmt.Printf("Machine %q started successfully\n", vmName)
+	newMachineEvent(events.Start, events.Event{Name: vmName})
+	return nil
 }

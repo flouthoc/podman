@@ -15,14 +15,16 @@
 package process
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
 
 	"github.com/containers/psgo/internal/host"
 	"github.com/containers/psgo/internal/proc"
-	"github.com/opencontainers/runc/libcontainer/user"
-	"github.com/pkg/errors"
+	"github.com/moby/sys/user"
+	"golang.org/x/sys/unix"
 )
 
 // Process includes process-related from the /proc FS.
@@ -50,7 +52,7 @@ type Process struct {
 func LookupGID(gid string) (string, error) {
 	gidNum, err := strconv.Atoi(gid)
 	if err != nil {
-		return "", errors.Wrap(err, "error parsing group ID")
+		return "", fmt.Errorf("error parsing group ID: %w", err)
 	}
 	g, err := user.LookupGid(gidNum)
 	if err != nil {
@@ -64,7 +66,7 @@ func LookupGID(gid string) (string, error) {
 func LookupUID(uid string) (string, error) {
 	uidNum, err := strconv.Atoi(uid)
 	if err != nil {
-		return "", errors.Wrap(err, "error parsing user ID")
+		return "", fmt.Errorf("error parsing user ID: %w", err)
 	}
 	u, err := user.LookupUid(uidNum)
 	if err != nil {
@@ -107,7 +109,7 @@ func FromPIDs(pids []string, joinUserNS bool) ([]*Process, error) {
 	for _, pid := range pids {
 		p, err := New(pid, joinUserNS)
 		if err != nil {
-			if os.IsNotExist(errors.Cause(err)) {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
 				// proc parsing is racy
 				// Let's ignore "does not exist" errors
 				continue
@@ -214,7 +216,7 @@ func (p *Process) StartTime() (time.Time, error) {
 	return time.Unix(sinceBoot+bootTime, 0), nil
 }
 
-// CPUTime returns the cumlative CPU time of process p as a time.Duration.
+// CPUTime returns the cumulative CPU time of process p as a time.Duration.
 func (p *Process) CPUTime() (time.Duration, error) {
 	user, err := strconv.ParseInt(p.Stat.Utime, 10, 64)
 	if err != nil {

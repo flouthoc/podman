@@ -5,18 +5,18 @@ This is example code, the production code has additional error checking and the 
 
 See items below for details on building, installing, contributing to Podman:
  - [Readme](README.md)
- - [Contributing](CONTRIBUTING.md)
- - [Podman Usage](transfer.md)
- - [Trouble Shooting](troubleshooting.md)
- - [Code Of Conduct](CODE-OF-CONDUCT.md)
+ - [Contributing](../../CONTRIBUTING.md)
+ - [Podman Usage](../../transfer.md)
+ - [Trouble Shooting](../../troubleshooting.md)
+ - [Code Of Conduct](../../CODE-OF-CONDUCT.md)
 
 ## Adding a new command `podman manifest`
 ```shell script
-$ mkdir -p $GOPATH/src/github.com/containers/podman/cmd/podmanV2/manifests
+$ mkdir -p $GOPATH/src/github.com/containers/podman/cmd/podman/manifest
 ```
-Create the file ```$GOPATH/src/github.com/containers/podman/cmd/podmanV2/manifests/manifest.go```
+Create the file ```$GOPATH/src/github.com/containers/podman/cmd/podman/manifest/manifest.go```
 ```go
-package manifests
+package manifest
 
 import (
     "github.com/containers/podman/cmd/podman/registry"
@@ -44,17 +44,17 @@ func init() {
     })
 }
 ```
-To "wire" in the `manifest` command, edit the file ```$GOPATH/src/github.com/containers/podman/cmd/podmanV2/main.go``` to add:
+To "wire" in the `manifest` command, edit the file ```$GOPATH/src/github.com/containers/podman/cmd/podman/main.go``` to add:
 ```go
 package main
 
-import	_ "github.com/containers/podman/cmd/podman/manifests"
+import	_ "github.com/containers/podman/cmd/podman/manifest"
 ```
 
-## Adding a new sub command `podman manifests list`
-Create the file ```$GOPATH/src/github.com/containers/podman/cmd/podmanV2/manifests/inspect.go```
+## Adding a new sub command `podman manifest list`
+Create the file ```$GOPATH/src/github.com/containers/podman/cmd/podman/manifest/inspect.go```
 ```go
-package manifests
+package manifest
 
 import (
     "github.com/containers/podman/cmd/podman/registry"
@@ -109,3 +109,11 @@ The complete set can be found in the `validate` package, here are some examples:
     created := validate.ChoiceValue(&opts.Sort, "command", "created", "id", "image", "names", "runningfor", "size", "status")
     flags.Var(created, "sort", "Sort output by: "+created.Choices())
     ```
+
+## Adding CLI flags
+
+When adding adding a new cli option that accepts a string array, there are two options to choose from: `StringSlice()` and `StringArray()`.
+They differ slightly in their behavior: `StringSlice()` allows the values to be comma separated so `--opt v1,v2 --opt v3` results in
+`[]string{"v1", "v2", "v3"}`, while `StringArray()`  would result in `[]string{"v1,v2", "v3"}`. Thus it is impossible to use values with comma in `StringSlice()`, which makes it unsuitable for flags that accept arbitrary values such as file paths as example. Also, because `StringSlice()` uses the csv lib to parse the values, it has special escaping rules for things like quotes, see https://github.com/containers/podman/issues/20064 for an example of how complicated things can get because of this.
+Thus use `StringSlice()` only when the option accepts predefined values that do not contain special characters, for example `--cap-add` and `--cap-drop` are a good example for this. Using `--cap-add NET_ADMIN,NET_RAW` is equal to `--cap-add NET_ADMIN --cap-add NET_RAW` so it is better suited to save some typing for users.
+When in doubt always choose `StringArray()` over `StringSlice()`.

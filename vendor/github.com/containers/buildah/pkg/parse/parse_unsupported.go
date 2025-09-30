@@ -1,10 +1,11 @@
-// +build !linux,!darwin
+//go:build !linux && !darwin
 
 package parse
 
 import (
+	"errors"
+
 	"github.com/containers/buildah/define"
-	"github.com/pkg/errors"
 )
 
 func getDefaultProcessLimits() []string {
@@ -12,5 +13,5 @@ func getDefaultProcessLimits() []string {
 }
 
 func DeviceFromPath(device string) (define.ContainerDevices, error) {
-	return nil, errors.Errorf("devices not supported")
+	return nil, errors.New("devices not supported")
 }

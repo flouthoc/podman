@@ -2,19 +2,18 @@ package volumes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -52,41 +51,37 @@ func init() {
 	flags := lsCommand.Flags()
 
 	filterFlagName := "filter"
-	flags.StringSliceVarP(&cliOpts.Filter, filterFlagName, "f", []string{}, "Filter volume output")
+	flags.StringArrayVarP(&cliOpts.Filter, filterFlagName, "f", []string{}, "Filter volume output")
 	_ = lsCommand.RegisterFlagCompletionFunc(filterFlagName, common.AutocompleteVolumeFilters)
 
 	formatFlagName := "format"
-	flags.StringVar(&cliOpts.Format, formatFlagName, "{{.Driver}}\t{{.Name}}\n", "Format volume output using Go template")
-	_ = lsCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(define.InspectVolumeData{}))
+	flags.StringVar(&cliOpts.Format, formatFlagName, "{{range .}}{{.Driver}}\t{{.Name}}\n{{end -}}", "Format volume output using Go template")
+	_ = lsCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.VolumeListReport{}))
 
-	flags.Bool("noheading", false, "Do not print headers")
+	flags.BoolP("noheading", "n", false, "Do not print headers")
 	flags.BoolVarP(&cliOpts.Quiet, "quiet", "q", false, "Print volume output in quiet mode")
 }
 
 func list(cmd *cobra.Command, args []string) error {
+	var err error
 	if cliOpts.Quiet && cmd.Flag("format").Changed {
 		return errors.New("quiet and format flags cannot be used together")
 	}
 	if len(cliOpts.Filter) > 0 {
 		lsOpts.Filter = make(map[string][]string)
 	}
-	for _, f := range cliOpts.Filter {
-		filterSplit := strings.SplitN(f, "=", 2)
-		if len(filterSplit) < 2 {
-			return errors.Errorf("filter input must be in the form of filter=value: %s is invalid", f)
-		}
-		lsOpts.Filter[filterSplit[0]] = append(lsOpts.Filter[filterSplit[0]], filterSplit[1])
+	lsOpts.Filter, err = parse.FilterArgumentsIntoFilters(cliOpts.Filter)
+	if err != nil {
+		return err
 	}
+
 	responses, err := registry.ContainerEngine().VolumeList(context.Background(), lsOpts)
 	if err != nil {
 		return err
 	}
 
-	switch {
-	case report.IsJSON(cliOpts.Format):
+	if report.IsJSON(cliOpts.Format) {
 		return outputJSON(responses)
-	case len(responses) < 1:
-		return nil
 	}
 	return outputTemplate(cmd, responses)
 }
@@ -97,29 +92,28 @@ func outputTemplate(cmd *cobra.Command, responses []*entities.VolumeListReport) 
 		"Name": "VOLUME NAME",
 	})
 
-	row := report.NormalizeFormat(cliOpts.Format)
-	if cliOpts.Quiet {
-		row = "{{.Name}}\n"
-	}
-	format := report.EnforceRange(row)
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
 
-	tmpl, err := report.NewTemplate("list").Parse(format)
+	var err error
+	switch {
+	case cmd.Flag("format").Changed:
+		rpt, err = rpt.Parse(report.OriginUser, cliOpts.Format)
+	case cliOpts.Quiet:
+		rpt, err = rpt.Parse(report.OriginUser, "{{.Name}}\n")
+	default:
+		rpt, err = rpt.Parse(report.OriginPodman, cliOpts.Format)
+	}
 	if err != nil {
 		return err
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
-	if !(noHeading || cliOpts.Quiet || cmd.Flag("format").Changed) {
-		if err := tmpl.Execute(w, headers); err != nil {
-			return errors.Wrapf(err, "failed to write report column headers")
+	if (rpt.RenderHeaders) && !noHeading {
+		if err := rpt.Execute(headers); err != nil {
+			return fmt.Errorf("failed to write report column headers: %w", err)
 		}
 	}
-	return tmpl.Execute(w, responses)
+	return rpt.Execute(responses)
 }
 
 func outputJSON(vols []*entities.VolumeListReport) error {

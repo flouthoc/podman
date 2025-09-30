@@ -1,15 +1,11 @@
-// +build !linux
+//go:build !remote && !linux && !freebsd
 
 package libpod
 
 import (
-	"context"
+	"errors"
 )
 
-func (r *Runtime) migrate(ctx context.Context) error {
-	return nil
-}
-
 func (r *Runtime) stopPauseProcess() error {
-	return nil
+	return errors.New("not implemented (*Runtime) stopPauseProcess")
 }

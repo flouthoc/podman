@@ -1,4 +1,4 @@
-% podman-export(1)
+% podman-export 1
 
 ## NAME
 podman\-export - Export a container's filesystem contents as a tar archive
@@ -24,24 +24,28 @@ Note: `:` is a restricted character and cannot be part of the file name.
 
 ## OPTIONS
 
-#### **--output**, **-o**
-
-Write to a file, default is STDOUT
-
 #### **--help**, **-h**
 
 Print usage statement
 
+#### **--output**, **-o**
+
+Write to a file, default is STDOUT
+
 ## EXAMPLES
 
+Export container into specified tar ball:
 ```
 $ podman export -o redis-container.tar 883504668ec465463bc0fe7e63d53154ac3b696ea8d7b233748918664ea90e57
+```
 
+Export container to stdout:
+```
 $ podman export 883504668ec465463bc0fe7e63d53154ac3b696ea8d7b233748918664ea90e57 > redis-container.tar
 ```
 
 ## SEE ALSO
-podman(1), podman-import(1)
+**[podman(1)](podman.1.md)**, **[podman-import(1)](podman-import.1.md)**
 
 ## HISTORY
 August 2017, Originally compiled by Urvashi Mohnani <umohnani@redhat.com>

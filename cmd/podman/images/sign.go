@@ -1,14 +1,15 @@
 package images
 
 import (
-	"os"
+	"errors"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 var (
@@ -48,17 +49,26 @@ func init() {
 	flags.StringVar(&signOptions.CertDir, certDirFlagName, "", "`Pathname` of a directory containing TLS certificates and keys")
 	_ = signCommand.RegisterFlagCompletionFunc(certDirFlagName, completion.AutocompleteDefault)
 	flags.BoolVarP(&signOptions.All, "all", "a", false, "Sign all the manifests of the multi-architecture image")
+
+	authfileFlagName := "authfile"
+	flags.StringVar(&signOptions.Authfile, authfileFlagName, auth.GetDefaultAuthFile(), "Path of the authentication file. Use REGISTRY_AUTH_FILE environment variable to override")
+	_ = signCommand.RegisterFlagCompletionFunc(authfileFlagName, completion.AutocompleteDefault)
 }
 
 func sign(cmd *cobra.Command, args []string) error {
+	if cmd.Flags().Changed("authfile") {
+		if err := auth.CheckAuthFile(signOptions.Authfile); err != nil {
+			return err
+		}
+	}
 	if signOptions.SignBy == "" {
-		return errors.Errorf("please provide an identity")
+		return errors.New("no identity provided")
 	}
 
 	var sigStoreDir string
 	if len(signOptions.Directory) > 0 {
 		sigStoreDir = signOptions.Directory
-		if _, err := os.Stat(sigStoreDir); err != nil {
+		if err := fileutils.Exists(sigStoreDir); err != nil {
 			return err
 		}
 	}

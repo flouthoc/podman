@@ -1,24 +1,28 @@
+//go:build !remote
+
 package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/containers/podman/v3/libpod/events"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/infra/abi"
+	"github.com/containers/podman/v5/libpod/events"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 
-	"github.com/containers/podman/v3/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/api/handlers"
 	"github.com/sirupsen/logrus"
 
-	"github.com/containers/podman/v3/libpod/define"
+	"github.com/containers/podman/v5/libpod/define"
 
-	"github.com/containers/podman/v3/libpod"
+	"github.com/containers/podman/v5/libpod"
 	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
 )
 
 type waitQueryDocker struct {
@@ -26,8 +30,8 @@ type waitQueryDocker struct {
 }
 
 type waitQueryLibpod struct {
-	Interval  string                   `schema:"interval"`
-	Condition []define.ContainerStatus `schema:"condition"`
+	Interval   string   `schema:"interval"`
+	Conditions []string `schema:"condition"`
 }
 
 func WaitContainerDocker(w http.ResponseWriter, r *http.Request) {
@@ -36,13 +40,13 @@ func WaitContainerDocker(w http.ResponseWriter, r *http.Request) {
 
 	query := waitQueryDocker{}
 
-	decoder := ctx.Value("decoder").(*schema.Decoder)
+	decoder := ctx.Value(api.DecoderKey).(*schema.Decoder)
 	if err = decoder.Decode(&query, r.URL.Query()); err != nil {
-		Error(w, "Something went wrong.", http.StatusBadRequest, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
-	interval := time.Nanosecond
+	interval := time.Millisecond * 250
 
 	condition := "not-running"
 	if _, found := r.URL.Query()["condition"]; found {
@@ -56,7 +60,6 @@ func WaitContainerDocker(w http.ResponseWriter, r *http.Request) {
 	name := GetName(r)
 
 	exists, err := containerExists(ctx, name)
-
 	if err != nil {
 		InternalServerError(w, err)
 		return
@@ -68,8 +71,8 @@ func WaitContainerDocker(w http.ResponseWriter, r *http.Request) {
 
 	// In docker compatibility mode we have to send headers in advance,
 	// otherwise docker client would freeze.
-	w.Header().Add("Content-Type", "application/json")
-	w.WriteHeader(200)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -77,7 +80,7 @@ func WaitContainerDocker(w http.ResponseWriter, r *http.Request) {
 	exitCode, err := waitDockerCondition(ctx, name, interval, condition)
 	var errStruct *struct{ Message string }
 	if err != nil {
-		logrus.Errorf("error while waiting on condition: %q", err)
+		logrus.Errorf("While waiting on condition: %q", err)
 		errStruct = &struct {
 			Message string
 		}{
@@ -93,20 +96,19 @@ func WaitContainerDocker(w http.ResponseWriter, r *http.Request) {
 	enc.SetEscapeHTML(true)
 	err = enc.Encode(&responseData)
 	if err != nil {
-		logrus.Errorf("unable to write json: %q", err)
+		logrus.Errorf("Unable to write json: %q", err)
 	}
 }
 
 func WaitContainerLibpod(w http.ResponseWriter, r *http.Request) {
 	var (
-		err        error
-		interval   = time.Millisecond * 250
-		conditions = []define.ContainerStatus{define.ContainerStateStopped, define.ContainerStateExited}
+		err      error
+		interval = time.Millisecond * 250
 	)
-	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
 	query := waitQueryLibpod{}
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		Error(w, "Something went wrong.", http.StatusBadRequest, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
@@ -118,38 +120,56 @@ func WaitContainerLibpod(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if _, found := r.URL.Query()["condition"]; found {
-		if len(query.Condition) > 0 {
-			conditions = query.Condition
-		}
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	containerEngine := &abi.ContainerEngine{Libpod: runtime}
+	opts := entities.WaitOptions{
+		Conditions: query.Conditions,
+		Interval:   interval,
 	}
-
 	name := GetName(r)
-
-	waitFn := createContainerWaitFn(r.Context(), name, interval)
-
-	exitCode, err := waitFn(conditions...)
+	reports, err := containerEngine.ContainerWait(r.Context(), []string{name}, opts)
 	if err != nil {
-		if errors.Cause(err) == define.ErrNoSuchCtr {
+		if errors.Is(err, define.ErrNoSuchCtr) {
+			// Special case: In the common scenario of podman-remote run --rm
+			// the API is required to attach + start + wait to get exit code.
+			// This has the problem that the wait call races against the container
+			// removal from the cleanup process so it may not get the exit code back.
+			// However we keep the exit code around for longer than the container so
+			// we can just look it up here. Of course this only works when we get a
+			// full id as param but podman-remote will do that
+			if len(opts.Conditions) == 0 {
+				if code, err := runtime.GetContainerExitCode(name); err == nil {
+					WriteResponse(w, http.StatusOK, strconv.Itoa(int(code)))
+					return
+				}
+			}
 			ContainerNotFound(w, name, err)
 			return
 		}
 		InternalServerError(w, err)
+	}
+	if len(reports) != 1 {
+		Error(w, http.StatusInternalServerError, fmt.Errorf("the ContainerWait() function returned unexpected count of reports: %d", len(reports)))
 		return
 	}
-	WriteResponse(w, http.StatusOK, strconv.Itoa(int(exitCode)))
+
+	WriteResponse(w, http.StatusOK, strconv.Itoa(int(reports[0].ExitCode)))
 }
 
 type containerWaitFn func(conditions ...define.ContainerStatus) (int32, error)
 
 func createContainerWaitFn(ctx context.Context, containerName string, interval time.Duration) containerWaitFn {
-	runtime := ctx.Value("runtime").(*libpod.Runtime)
+	runtime := ctx.Value(api.RuntimeKey).(*libpod.Runtime)
 	var containerEngine entities.ContainerEngine = &abi.ContainerEngine{Libpod: runtime}
 
 	return func(conditions ...define.ContainerStatus) (int32, error) {
+		var rawConditions []string
+		for _, con := range conditions {
+			rawConditions = append(rawConditions, con.String())
+		}
 		opts := entities.WaitOptions{
-			Condition: conditions,
-			Interval:  interval,
+			Conditions: rawConditions,
+			Interval:   interval,
 		}
 		ctrWaitReport, err := containerEngine.ContainerWait(ctx, []string{containerName}, opts)
 		if err != nil {
@@ -191,24 +211,32 @@ func waitDockerCondition(ctx context.Context, containerName string, interval tim
 var notRunningStates = []define.ContainerStatus{
 	define.ContainerStateCreated,
 	define.ContainerStateRemoving,
-	define.ContainerStateStopped,
 	define.ContainerStateExited,
 	define.ContainerStateConfigured,
 }
 
 func waitRemoved(ctrWait containerWaitFn) (int32, error) {
-	code, err := ctrWait(define.ContainerStateUnknown)
-	if err != nil && errors.Cause(err) == define.ErrNoSuchCtr {
-		return code, nil
+	var code int32
+	for {
+		c, err := ctrWait(define.ContainerStateExited)
+		if errors.Is(err, define.ErrNoSuchCtr) {
+			// Make sure to wait until the container has been removed.
+			break
+		}
+		if err != nil {
+			return code, err
+		}
+		// If the container doesn't exist, the return code is -1, so
+		// only set it in case of success.
+		code = c
 	}
-	return code, err
+	return code, nil
 }
 
 func waitNextExit(ctx context.Context, containerName string) (int32, error) {
-	runtime := ctx.Value("runtime").(*libpod.Runtime)
+	runtime := ctx.Value(api.RuntimeKey).(*libpod.Runtime)
 	containerEngine := &abi.ContainerEngine{Libpod: runtime}
-	eventChannel := make(chan *events.Event)
-	errChannel := make(chan error)
+	eventChannel := make(chan events.ReadResult)
 	opts := entities.EventsOptions{
 		EventChan: eventChannel,
 		Filter:    []string{"event=died", fmt.Sprintf("container=%s", containerName)},
@@ -218,18 +246,22 @@ func waitNextExit(ctx context.Context, containerName string) (int32, error) {
 	// ctx is used to cancel event watching goroutine
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go func() {
-		errChannel <- containerEngine.Events(ctx, opts)
-	}()
-
-	evt, ok := <-eventChannel
-	if ok {
-		return int32(evt.ContainerExitCode), nil
+	err := containerEngine.Events(ctx, opts)
+	if err != nil {
+		return -1, err
 	}
-	// if ok == false then containerEngine.Events() has exited
+
+	for evt := range eventChannel {
+		if evt.Error == nil {
+			if evt.Event.ContainerExitCode != nil {
+				return int32(*evt.Event.ContainerExitCode), nil
+			}
+		}
+	}
+	// if we are here then containerEngine.Events() has exited
 	// it may happen if request was canceled (e.g. client closed connection prematurely) or
 	// the server is in process of shutting down
-	return -1, <-errChannel
+	return -1, nil
 }
 
 func waitNotRunning(ctrWait containerWaitFn) (int32, error) {
@@ -237,7 +269,7 @@ func waitNotRunning(ctrWait containerWaitFn) (int32, error) {
 }
 
 func containerExists(ctx context.Context, name string) (bool, error) {
-	runtime := ctx.Value("runtime").(*libpod.Runtime)
+	runtime := ctx.Value(api.RuntimeKey).(*libpod.Runtime)
 	var containerEngine entities.ContainerEngine = &abi.ContainerEngine{Libpod: runtime}
 
 	var ctrExistsOpts entities.ContainerExistsOptions
@@ -246,4 +278,24 @@ func containerExists(ctx context.Context, name string) (bool, error) {
 		return false, err
 	}
 	return ctrExistRep.Value, nil
+}
+
+// PSTitles merges CAPS headers from ps output. All PS headers are single words, except for
+// CAPS. Function compines CAP Headers into single field separated by a space.
+func PSTitles(output string) []string {
+	var titles []string
+
+	for title := range strings.FieldsSeq(output) {
+		switch title {
+		case "AMBIENT", "INHERITED", "PERMITTED", "EFFECTIVE", "BOUNDING":
+			{
+				titles = append(titles, title+" CAPS")
+			}
+		case "CAPS":
+			continue
+		default:
+			titles = append(titles, title)
+		}
+	}
+	return titles
 }

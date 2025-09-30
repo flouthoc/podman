@@ -1,13 +1,20 @@
+//go:build !remote
+
 package libpod
 
 import (
-	"os"
-	"path/filepath"
+	"fmt"
+	"io"
+	"maps"
 	"time"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/libpod/lock"
-	"github.com/containers/podman/v3/libpod/plugin"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/libpod/lock"
+	"github.com/containers/podman/v5/libpod/plugin"
+	"github.com/containers/podman/v5/utils"
+	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/archive"
+	"go.podman.io/storage/pkg/directory"
 )
 
 // Volume is a libpod named volume.
@@ -18,10 +25,11 @@ type Volume struct {
 	config *VolumeConfig
 	state  *VolumeState
 
-	valid   bool
-	plugin  *plugin.VolumePlugin
-	runtime *Runtime
-	lock    lock.Locker
+	ignoreIfExists bool
+	valid          bool
+	plugin         *plugin.VolumePlugin
+	runtime        *Runtime
+	lock           lock.Locker
 }
 
 // VolumeConfig holds the volume's immutable configuration.
@@ -38,7 +46,7 @@ type VolumeConfig struct {
 	// The location the volume is mounted at.
 	MountPoint string `json:"mountPoint"`
 	// Time the volume was created.
-	CreatedTime time.Time `json:"createdAt,omitempty"`
+	CreatedTime time.Time `json:"createdAt"`
 	// Options to pass to the volume driver. For the local driver, this is
 	// a list of mount options. For other drivers, they are passed to the
 	// volume driver handling the volume.
@@ -49,6 +57,26 @@ type VolumeConfig struct {
 	UID int `json:"uid"`
 	// GID the volume will be created as.
 	GID int `json:"gid"`
+	// Size maximum of the volume.
+	Size uint64 `json:"size"`
+	// Inodes maximum of the volume.
+	Inodes uint64 `json:"inodes"`
+	// DisableQuota indicates that the volume should completely disable using any
+	// quota tracking.
+	DisableQuota bool `json:"disableQuota,omitempty"`
+	// Timeout allows users to override the default driver timeout of 5 seconds
+	Timeout *uint `json:"timeout,omitempty"`
+	// StorageName is the name of the volume in c/storage. Only used for
+	// image volumes.
+	StorageName string `json:"storageName,omitempty"`
+	// StorageID is the ID of the volume in c/storage. Only used for image
+	// volumes.
+	StorageID string `json:"storageID,omitempty"`
+	// StorageImageID is the ID of the image the volume was based off of.
+	// Only used for image volumes.
+	StorageImageID string `json:"storageImageID,omitempty"`
+	// MountLabel is the SELinux label to assign to mount points
+	MountLabel string `json:"mountlabel,omitempty"`
 }
 
 // VolumeState holds the volume's mutable state.
@@ -76,6 +104,10 @@ type VolumeState struct {
 	// a container, the container will chown the volume to the container process
 	// UID/GID.
 	NeedsChown bool `json:"notYetChowned,omitempty"`
+	// Indicates that a copy-up event occurred during the current mount of
+	// the volume into a container.
+	// We use this to determine if a chown is appropriate.
+	CopiedUp bool `json:"copiedUp,omitempty"`
 	// UIDChowned is the UID the volume was chowned to.
 	UIDChowned int `json:"uidChowned,omitempty"`
 	// GIDChowned is the GID the volume was chowned to.
@@ -89,14 +121,8 @@ func (v *Volume) Name() string {
 
 // Returns the size on disk of volume
 func (v *Volume) Size() (uint64, error) {
-	var size uint64
-	err := filepath.Walk(v.config.MountPoint, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			size += (uint64)(info.Size())
-		}
-		return err
-	})
-	return size, err
+	size, err := directory.Size(v.config.MountPoint)
+	return uint64(size), err
 }
 
 // Driver retrieves the volume's driver.
@@ -114,16 +140,14 @@ func (v *Volume) Scope() string {
 // Labels returns the volume's labels
 func (v *Volume) Labels() map[string]string {
 	labels := make(map[string]string)
-	for key, value := range v.config.Labels {
-		labels[key] = value
-	}
+	maps.Copy(labels, v.config.Labels)
 	return labels
 }
 
 // MountPoint returns the volume's mountpoint on the host
 func (v *Volume) MountPoint() (string, error) {
 	// For the sake of performance, avoid locking unless we have to.
-	if v.UsesVolumeDriver() {
+	if v.UsesVolumeDriver() || v.config.Driver == define.VolumeDriverImage {
 		v.lock.Lock()
 		defer v.lock.Unlock()
 
@@ -135,9 +159,20 @@ func (v *Volume) MountPoint() (string, error) {
 	return v.mountPoint(), nil
 }
 
+// MountCount returns the volume's mountcount on the host from state
+// Useful in determining if volume is using plugin or a filesystem mount and its mount
+func (v *Volume) MountCount() (uint, error) {
+	v.lock.Lock()
+	defer v.lock.Unlock()
+	if err := v.update(); err != nil {
+		return 0, err
+	}
+	return v.state.MountCount, nil
+}
+
 // Internal-only helper for volume mountpoint
 func (v *Volume) mountPoint() string {
-	if v.UsesVolumeDriver() {
+	if v.UsesVolumeDriver() || v.config.Driver == define.VolumeDriverImage {
 		return v.state.MountPoint
 	}
 
@@ -147,9 +182,7 @@ func (v *Volume) mountPoint() string {
 // Options return the volume's options
 func (v *Volume) Options() map[string]string {
 	options := make(map[string]string)
-	for k, v := range v.config.Options {
-		options[k] = v
-	}
+	maps.Copy(options, v.config.Options)
 	return options
 }
 
@@ -238,5 +271,80 @@ func (v *Volume) IsDangling() (bool, error) {
 // drivers are pluggable backends for volumes that will manage the storage and
 // mounting.
 func (v *Volume) UsesVolumeDriver() bool {
-	return !(v.config.Driver == define.VolumeDriverLocal || v.config.Driver == "")
+	if v.config.Driver == define.VolumeDriverImage {
+		if _, ok := v.runtime.config.Engine.VolumePlugins[v.config.Driver]; ok {
+			return true
+		}
+		return false
+	}
+	return v.config.Driver != define.VolumeDriverLocal && v.config.Driver != ""
+}
+
+func (v *Volume) Mount() (string, error) {
+	v.lock.Lock()
+	defer v.lock.Unlock()
+	err := v.mount()
+	return v.config.MountPoint, err
+}
+
+func (v *Volume) Unmount() error {
+	v.lock.Lock()
+	defer v.lock.Unlock()
+	return v.unmount(false)
+}
+
+func (v *Volume) NeedsMount() bool {
+	return v.needsMount()
+}
+
+// Export volume to tar.
+// Returns a ReadCloser which points to a tar of all the volume's contents.
+func (v *Volume) Export() (io.ReadCloser, error) {
+	v.lock.Lock()
+	err := v.mount()
+	mountPoint := v.mountPoint()
+	v.lock.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		v.lock.Lock()
+		defer v.lock.Unlock()
+
+		if err := v.unmount(false); err != nil {
+			logrus.Errorf("Error unmounting volume %s: %v", v.Name(), err)
+		}
+	}()
+
+	volContents, err := utils.TarWithChroot(mountPoint)
+	if err != nil {
+		return nil, fmt.Errorf("creating tar of volume %s contents: %w", v.Name(), err)
+	}
+
+	return volContents, nil
+}
+
+// Import a volume from a tar file, provided as an io.Reader.
+func (v *Volume) Import(r io.Reader) error {
+	v.lock.Lock()
+	err := v.mount()
+	mountPoint := v.mountPoint()
+	v.lock.Unlock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		v.lock.Lock()
+		defer v.lock.Unlock()
+
+		if err := v.unmount(false); err != nil {
+			logrus.Errorf("Error unmounting volume %s: %v", v.Name(), err)
+		}
+	}()
+
+	if err := archive.Untar(r, mountPoint, nil); err != nil {
+		return fmt.Errorf("extracting into volume %s: %w", v.Name(), err)
+	}
+
+	return nil
 }

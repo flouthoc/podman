@@ -23,7 +23,6 @@ class ImageTestCase(APITestCase):
             "SharedSize",
             "VirtualSize",
             "Labels",
-            "Containers",
         )
         images = r.json()
         self.assertIsInstance(images, list)
@@ -31,6 +30,9 @@ class ImageTestCase(APITestCase):
             self.assertIsInstance(item, dict)
             for k in required_keys:
                 self.assertIn(k, item)
+
+            # Id should be prefixed with sha256: (#11645)
+            self.assertIn("sha256:",item['Id'])
 
     def test_inspect(self):
         r = requests.get(self.podman_url + "/v1.40/images/alpine/json")
@@ -42,7 +44,6 @@ class ImageTestCase(APITestCase):
             "Parent",
             "Comment",
             "Created",
-            "Container",
             "DockerVersion",
             "Author",
             "Architecture",
@@ -59,11 +60,12 @@ class ImageTestCase(APITestCase):
         for item in required_keys:
             self.assertIn(item, image)
         _ = parse(image["Created"])
+        # Id should be prefixed with sha256: (#11645)
+        self.assertIn("sha256:",image['Id'])
 
     def test_delete(self):
-        r = requests.delete(self.podman_url + "/v1.40/images/alpine?force=true")
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertIsInstance(r.json(), list)
+        r = requests.delete(self.compat_uri("images/alpine?force=true"))
+        self.assertEqual(r.status_code, 409, r.text)
 
     def test_pull(self):
         r = requests.post(self.uri("/images/pull?reference=alpine"), timeout=15)
@@ -86,6 +88,27 @@ class ImageTestCase(APITestCase):
         self.assertTrue(keys["id"], "Expected to find id stanza")
         self.assertTrue(keys["images"], "Expected to find images stanza")
         self.assertTrue(keys["stream"], "Expected to find stream progress stanza's")
+
+        r = requests.post(self.uri("/images/pull?reference=alpine&quiet=true"), timeout=15)
+        self.assertEqual(r.status_code, 200, r.status_code)
+        text = r.text
+        keys = {
+            "error": False,
+            "id": False,
+            "images": False,
+            "stream": False,
+        }
+        # Read and record stanza's from pull
+        for line in str.splitlines(text):
+            obj = json.loads(line)
+            key_list = list(obj.keys())
+            for k in key_list:
+                keys[k] = True
+
+        self.assertFalse(keys["error"], "Expected no errors")
+        self.assertTrue(keys["id"], "Expected to find id stanza")
+        self.assertTrue(keys["images"], "Expected to find images stanza")
+        self.assertFalse(keys["stream"], "Expected to find stream progress stanza's")
 
     def test_create(self):
         r = requests.post(

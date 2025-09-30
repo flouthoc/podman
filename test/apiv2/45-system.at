@@ -7,8 +7,8 @@
 t POST 'libpod/system/prune?volumes=true&all=true' params='' 200
 
 ## podman system df
-t GET system/df 200 '{"LayersSize":0,"Images":[],"Containers":[],"Volumes":[],"BuildCache":[],"BuilderSize":0}'
-t GET libpod/system/df 200 '{"Images":[],"Containers":[],"Volumes":[]}'
+t GET system/df 200 '{"LayersSize":0,"Images":[],"Containers":[],"Volumes":[],"BuildCache":[]}'
+t GET libpod/system/df 200 '{"ImagesSize":0,"Images":[],"Containers":[],"Volumes":[]}'
 
 # Create volume. We expect df to report this volume next invocation of system/df
 t GET libpod/info 200
@@ -24,6 +24,49 @@ t POST libpod/volumes/create name=foo1  201 \
 t GET system/df 200 '.Volumes[0].Name=foo1'
 
 t GET libpod/system/df 200 '.Volumes[0].VolumeName=foo1'
+
+# Verify that no containers reference the volume
+t GET system/df 200 '.Volumes[0].UsageData.RefCount=0'
+
+# Make a container using the volume
+podman pull $IMAGE &>/dev/null
+t POST containers/create Image=$IMAGE Volumes='{"/test":{}}' HostConfig='{"Binds":["foo1:/test"]}' 201 \
+  .Id~[0-9a-f]\\{64\\}
+cid=$(jq -r '.Id' <<<"$output")
+
+# Verify image takes size
+t GET system/df 200 '.LayersSize=12180391'
+t GET libpod/system/df 200 '.ImagesSize=12180391'
+
+# VirtualSize was computed (somehow) in v1.43 so we need to
+# build an image to test that the value is returned
+# in API <= v1.43.
+IIDFILE=$(mktemp)
+podman build --iidfile $IIDFILE -<< EOF
+FROM $IMAGE
+RUN :
+EOF
+
+# Test VirtualSize field is present in API v1.43 for system/df (backward compatibility)
+t GET /v1.43/system/df 200 \
+    .Images[0].Size~[0-9]\\+ \
+    .Images[0].VirtualSize~[0-9]\\+
+
+# Test VirtualSize field is no longer present in API v1.44+ for system/df (deprecated since API v1.43)
+t GET /v1.44/system/df 200 \
+    .Images[0].Size~[0-9]\\+ \
+    .Images[0].VirtualSize=null
+
+podman rmi -f $(< $IIDFILE)
+
+# Verify that one container references the volume
+t GET system/df 200 '.Volumes[0].UsageData.RefCount=1'
+
+# Remove the container
+t DELETE containers/$cid?v=true 204
+
+# Verify that no containers reference the volume
+t GET system/df 200 '.Volumes[0].UsageData.RefCount=0'
 
 # Create two more volumes to test pruneing
 t POST libpod/volumes/create \
@@ -69,3 +112,5 @@ t POST 'libpod/system/prune?volumes=true&filters={"label":["testlabel1"]}' param
 t POST 'libpod/system/prune?volumes=true' params='' 200 .VolumePruneReports[0].Id=foo1
 
 # TODO add other system prune tests for pods / images
+
+# vim: filetype=sh

@@ -104,6 +104,11 @@ func (mon *SocketMonitor) Disconnect() error {
 	atomic.StoreInt32(mon.listeners, 0)
 	err := mon.c.Close()
 
+	if mon.stream != nil {
+		for range mon.stream {
+		}
+	}
+
 	return err
 }
 
@@ -263,7 +268,7 @@ func (mon *SocketMonitor) RunWithFile(command []byte, file *os.File) ([]byte, er
 type banner struct {
 	QMP struct {
 		Capabilities []string `json:"capabilities"`
-		Version Version `json:"version"`
+		Version      Version  `json:"version"`
 	} `json:"QMP"`
 }
 

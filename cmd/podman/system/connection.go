@@ -1,24 +1,21 @@
 package system
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/spf13/cobra"
 )
 
 var (
-	// Skip creating engines since this command will obtain connection information to said engines
-	noOp = func(cmd *cobra.Command, args []string) error {
-		return nil
-	}
-
+	// ConnectionCmd skips creating engines (PersistentPreRunE/PersistentPostRunE are No-Op's) since
+	// sub-commands will obtain connection information to said engines
 	ConnectionCmd = &cobra.Command{
 		Use:                "connection",
-		Short:              "Manage remote ssh destinations",
-		Long:               `Manage ssh destination information in podman configuration`,
-		PersistentPreRunE:  noOp,
+		Short:              "Manage remote API service destinations",
+		Long:               `Manage remote API service destination information in podman configuration`,
+		PersistentPreRunE:  validate.NoOp,
 		RunE:               validate.SubCommandExists,
-		PersistentPostRunE: noOp,
+		PersistentPostRunE: validate.NoOp,
 		TraverseChildren:   false,
 	}
 )

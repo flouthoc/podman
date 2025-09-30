@@ -1,8 +1,8 @@
 package network
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +17,7 @@ var (
 		Long:  "Manage networks",
 		RunE:  validate.SubCommandExists,
 	}
+	containerConfig = registry.PodmanConfig().ContainersConfDefaultsRO
 )
 
 func init() {

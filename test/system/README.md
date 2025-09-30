@@ -5,23 +5,22 @@ debug failures.
 Quick Start
 ===========
 
-Look at [030-run.bats](030-run.bats) for a simple but packed example.
+Look at [000-TEMPLATE](000-TEMPLATE) for a simple starting point.
 This introduces the basic set of helper functions:
 
-* `setup` (implicit) - resets container storage so there's
-one and only one (standard) image, and no running containers.
+* `setup` (implicit) - establishes a test environment.
 
 * `parse_table` - you can define tables of inputs and expected results,
 then read those in a `while` loop. This makes it easy to add new tests.
 Because bash is not a programming language, the caller of `parse_table`
-sometimes needs to massage the returned values; `015-run.bats` offers
+sometimes needs to massage the returned values; `030-run.bats` offers
 examples of how to deal with the more typical such issues.
 
 * `run_podman` - runs command defined in `$PODMAN` (default: 'podman'
 but could also be './bin/podman' or 'podman-remote'), with a timeout.
 Checks its exit status.
 
-* `is` - compare actual vs expected output. Emits a useful diagnostic
+* `assert` - compare actual vs expected output. Emits a useful diagnostic
 on failure.
 
 * `die` - output a properly-formatted message to stderr, and fail test
@@ -30,7 +29,13 @@ on failure.
 
 * `skip_if_remote` - like the above, but skip if testing `podman-remote`
 
-* `random_string` - returns a pseudorandom alphanumeric string
+* `safename` - generates a pseudorandom lower-case string suitable
+for use in names for containers, images, volumes, any object. String
+includes the BATS test number, making it possible to identify the
+source of leaks (failure to clean up) at the end of tests.
+
+* `random_string` - returns a pseudorandom alphanumeric string suitable
+for verifying I/O.
 
 Test files are of the form `NNN-name.bats` where NNN is a three-digit
 number. Please preserve this convention, it simplifies viewing the
@@ -46,12 +51,9 @@ without having to wait for the entire test suite.
 
 Running tests
 =============
-To run the tests locally in your sandbox, you can use one of these methods:
-* make;PODMAN=./bin/podman bats ./test/system/070-build.bats # runs just the specified test
-* make;PODMAN=./bin/podman bats ./test/system                # runs all
+To run the tests locally in your sandbox using `hack/bats` is recommend, check `hack/bats --help` for info about usage.
 
-To test as root:
-*  $ PODMAN=./bin/podman sudo --preserve-env=PODMAN bats test/system
+To run the entire suite use `make localsystem` or `make remotesystem` for podman-remote testing.
 
 Analyzing test failures
 =======================
@@ -62,7 +64,7 @@ commands, their output and exit codes. In a normal run you will never
 see this, but BATS will display it on failure. The goal here is to
 give you everything you need to diagnose without having to rerun tests.
 
-The `is` comparison function is designed to emit useful diagnostics,
+The `assert` comparison function is designed to emit useful diagnostics,
 in particular, the actual and expected strings. Please do not use
 the horrible BATS standard of `[ x = y ]`; that's nearly useless
 for tracking down failures.
@@ -81,7 +83,15 @@ the function or perhaps just a substring.
 Requirements
 ============
 
-The `jq` tool is needed for parsing JSON output.
+- bats
+- jq
+- skopeo
+- httpd-tools
+- openssl
+- socat
+- buildah
+- gnupg
+- xfsprogs
 
 
 Further Details

@@ -3,26 +3,28 @@ package network
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/network"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
 	networklistDescription = `List networks`
 	networklistCommand     = &cobra.Command{
 		Use:               "ls [options]",
+		Aliases:           []string{"list"},
 		Args:              validate.NoArgs,
-		Short:             "network list",
+		Short:             "List networks",
 		Long:              networklistDescription,
 		RunE:              networkList,
 		ValidArgsFunction: completion.AutocompleteNone,
@@ -39,14 +41,14 @@ var (
 func networkListFlags(flags *pflag.FlagSet) {
 	formatFlagName := "format"
 	flags.StringVar(&networkListOptions.Format, formatFlagName, "", "Pretty-print networks to JSON or using a Go template")
-	_ = networklistCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(ListPrintReports{}))
+	_ = networklistCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&ListPrintReports{}))
 
 	flags.BoolVarP(&networkListOptions.Quiet, "quiet", "q", false, "display only names")
 	flags.BoolVar(&noTrunc, "no-trunc", false, "Do not truncate the network ID")
 
 	filterFlagName := "filter"
 	flags.StringArrayVarP(&filters, filterFlagName, "f", nil, "Provide filter values (e.g. 'name=podman')")
-	flags.Bool("noheading", false, "Do not print headers")
+	flags.BoolP("noheading", "n", false, "Do not print headers")
 	_ = networklistCommand.RegisterFlagCompletionFunc(filterFlagName, common.AutocompleteNetworkFilters)
 }
 
@@ -60,18 +62,20 @@ func init() {
 }
 
 func networkList(cmd *cobra.Command, args []string) error {
-	networkListOptions.Filters = make(map[string][]string)
-	for _, f := range filters {
-		split := strings.SplitN(f, "=", 2)
-		if len(split) == 1 {
-			return errors.Errorf("invalid filter %q", f)
-		}
-		networkListOptions.Filters[split[0]] = append(networkListOptions.Filters[split[0]], split[1])
+	var err error
+	networkListOptions.Filters, err = parse.FilterArgumentsIntoFilters(filters)
+	if err != nil {
+		return err
 	}
+
 	responses, err := registry.ContainerEngine().NetworkList(registry.Context(), networkListOptions)
 	if err != nil {
 		return err
 	}
+	// sort the networks to make sure the order is deterministic
+	sort.Slice(responses, func(i, j int) bool {
+		return responses[i].Name < responses[j].Name
+	})
 
 	switch {
 	// quiet means we only print the network names
@@ -84,19 +88,19 @@ func networkList(cmd *cobra.Command, args []string) error {
 
 	// table or other format output
 	default:
-		err = templateOut(responses, cmd)
+		err = templateOut(cmd, responses)
 	}
 
 	return err
 }
 
-func quietOut(responses []*entities.NetworkListReport) {
+func quietOut(responses []types.Network) {
 	for _, r := range responses {
 		fmt.Println(r.Name)
 	}
 }
 
-func jsonOut(responses []*entities.NetworkListReport) error {
+func jsonOut(responses []types.Network) error {
 	prettyJSON, err := json.MarshalIndent(responses, "", "  ")
 	if err != nil {
 		return err
@@ -105,7 +109,7 @@ func jsonOut(responses []*entities.NetworkListReport) error {
 	return nil
 }
 
-func templateOut(responses []*entities.NetworkListReport, cmd *cobra.Command) error {
+func templateOut(cmd *cobra.Command, responses []types.Network) error {
 	nlprs := make([]ListPrintReports, 0, len(responses))
 	for _, r := range responses {
 		nlprs = append(nlprs, ListPrintReports{r})
@@ -113,63 +117,44 @@ func templateOut(responses []*entities.NetworkListReport, cmd *cobra.Command) er
 
 	// Headers() gets lost resolving the embedded field names so add them
 	headers := report.Headers(ListPrintReports{}, map[string]string{
-		"Name":       "name",
-		"CNIVersion": "version",
-		"Version":    "version",
-		"Plugins":    "plugins",
-		"Labels":     "labels",
-		"ID":         "network id",
+		"Name":   "name",
+		"Driver": "driver",
+		"Labels": "labels",
+		"ID":     "network id",
 	})
 
-	renderHeaders := report.HasTable(networkListOptions.Format)
-	var row, format string
-	if cmd.Flags().Changed("format") {
-		row = report.NormalizeFormat(networkListOptions.Format)
-	} else { // 'podman network ls' equivalent to 'podman network ls --format="table {{.ID}} {{.Name}} {{.Version}} {{.Plugins}}" '
-		renderHeaders = true
-		row = "{{.ID}}\t{{.Name}}\t{{.Version}}\t{{.Plugins}}\n"
-	}
-	format = report.EnforceRange(row)
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
 
-	tmpl, err := report.NewTemplate("list").Parse(format)
+	var err error
+	switch {
+	case cmd.Flag("format").Changed:
+		rpt, err = rpt.Parse(report.OriginUser, networkListOptions.Format)
+	default:
+		rpt, err = rpt.Parse(report.OriginPodman, "{{range .}}{{.ID}}\t{{.Name}}\t{{.Driver}}\n{{end -}}")
+	}
 	if err != nil {
 		return err
 	}
-
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
 
 	noHeading, _ := cmd.Flags().GetBool("noheading")
-	if !noHeading && renderHeaders {
-		if err := tmpl.Execute(w, headers); err != nil {
-			return err
+	if rpt.RenderHeaders && !noHeading {
+		if err := rpt.Execute(headers); err != nil {
+			return fmt.Errorf("failed to write report column headers: %w", err)
 		}
 	}
-	return tmpl.Execute(w, nlprs)
+	return rpt.Execute(nlprs)
 }
 
 // ListPrintReports returns the network list report
 type ListPrintReports struct {
-	*entities.NetworkListReport
-}
-
-// Version returns the CNI version
-func (n ListPrintReports) Version() string {
-	return n.CNIVersion
-}
-
-// Plugins returns the CNI Plugins
-func (n ListPrintReports) Plugins() string {
-	return network.GetCNIPlugins(n.NetworkConfigList)
+	types.Network
 }
 
 // Labels returns any labels added to a Network
 func (n ListPrintReports) Labels() string {
-	list := make([]string, 0, len(n.NetworkListReport.Labels))
-	for k, v := range n.NetworkListReport.Labels {
+	list := make([]string, 0, len(n.Network.Labels))
+	for k, v := range n.Network.Labels {
 		list = append(list, k+"="+v)
 	}
 	return strings.Join(list, ",")
@@ -181,5 +166,5 @@ func (n ListPrintReports) ID() string {
 	if noTrunc {
 		length = 64
 	}
-	return network.GetNetworkID(n.Name)[:length]
+	return n.Network.ID[:length]
 }

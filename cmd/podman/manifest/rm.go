@@ -4,21 +4,23 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/errorhandling"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/spf13/cobra"
 )
 
 var (
-	rmCmd = &cobra.Command{
-		Use:               "rm LIST",
+	rmOptions = entities.ImageRemoveOptions{}
+	rmCmd     = &cobra.Command{
+		Use:               "rm [options] LIST [LIST...]",
 		Short:             "Remove manifest list or image index from local storage",
 		Long:              "Remove manifest list or image index from local storage.",
 		RunE:              rm,
+		Args:              cobra.MinimumNArgs(1),
 		ValidArgsFunction: common.AutocompleteImages,
 		Example:           `podman manifest rm mylist:v1.11`,
-		Args:              cobra.ExactArgs(1),
 	}
 )
 
@@ -27,10 +29,13 @@ func init() {
 		Command: rmCmd,
 		Parent:  manifestCmd,
 	})
+
+	flags := rmCmd.Flags()
+	flags.BoolVarP(&rmOptions.Ignore, "ignore", "i", false, "Ignore errors when a specified manifest is missing")
 }
 
 func rm(cmd *cobra.Command, args []string) error {
-	report, rmErrors := registry.ImageEngine().ManifestRm(context.Background(), args)
+	report, rmErrors := registry.ImageEngine().ManifestRm(context.Background(), args, rmOptions)
 	if report != nil {
 		for _, u := range report.Untagged {
 			fmt.Println("Untagged: " + u)

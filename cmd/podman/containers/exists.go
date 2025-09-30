@@ -2,10 +2,11 @@ package containers
 
 import (
 	"context"
+	"strings"
 
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
@@ -41,7 +42,7 @@ func exists(cmd *cobra.Command, args []string) error {
 	options := entities.ContainerExistsOptions{
 		External: external,
 	}
-	response, err := registry.ContainerEngine().ContainerExists(context.Background(), args[0], options)
+	response, err := registry.ContainerEngine().ContainerExists(context.Background(), strings.TrimPrefix(args[0], "/"), options)
 	if err != nil {
 		return err
 	}

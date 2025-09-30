@@ -1,40 +1,48 @@
+//go:build !remote
+
 package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
-	goRuntime "runtime"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/shutdown"
-	"github.com/containers/podman/v3/pkg/api/handlers"
-	"github.com/containers/podman/v3/pkg/api/server/idle"
-	"github.com/coreos/go-systemd/v22/activation"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/libpod/shutdown"
+	"github.com/containers/podman/v5/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/api/server/idle"
+	"github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/util/tlsutil"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
 type APIServer struct {
 	http.Server                      // The  HTTP work happens here
-	*schema.Decoder                  // Decoder for Query parameters to structs
-	context.Context                  // Context to carry objects to handlers
-	*libpod.Runtime                  // Where the real work happens
 	net.Listener                     // mux for routing HTTP API calls to libpod routines
+	*libpod.Runtime                  // Where the real work happens
+	*schema.Decoder                  // Decoder for Query parameters to structs
 	context.CancelFunc               // Stop APIServer
+	context.Context                  // Context to carry objects to handlers
+	CorsHeaders        string        // Inject Cross-Origin Resource Sharing (CORS) headers
+	PProfAddr          string        // Binding network address for pprof profiles
 	idleTracker        *idle.Tracker // Track connections to support idle shutdown
-	pprof              *http.Server  // Sidecar http server for providing performance data
-	CorsHeaders        string        // Inject CORS headers to each request
+	tlsCertFile        string        // TLS serving certificate PEM file
+	tlsKeyFile         string        // TLS serving certificate private key PEM file
+	tlsClientCAFile    string        // TLS client certifiicate CA bundle PEM file
 }
 
 // Number of seconds to wait for next request, if exceeded shutdown server
@@ -47,62 +55,64 @@ const (
 // shutdownOnce ensures Shutdown() may safely be called from several go routines
 var shutdownOnce sync.Once
 
-type Options struct {
-	Timeout     time.Duration
-	CorsHeaders string
-}
-
-// NewServer will create and configure a new API server with all defaults
-func NewServer(runtime *libpod.Runtime) (*APIServer, error) {
-	return newServer(runtime, DefaultServiceDuration, nil, DefaultCorsHeaders)
-}
-
 // NewServerWithSettings will create and configure a new API server using provided settings
-func NewServerWithSettings(runtime *libpod.Runtime, listener *net.Listener, opts Options) (*APIServer, error) {
-	return newServer(runtime, opts.Timeout, listener, opts.CorsHeaders)
+func NewServerWithSettings(runtime *libpod.Runtime, listener net.Listener, opts entities.ServiceOptions) (*APIServer, error) {
+	return newServer(runtime, listener, opts)
 }
 
-func newServer(runtime *libpod.Runtime, duration time.Duration, listener *net.Listener, corsHeaders string) (*APIServer, error) {
-	// If listener not provided try socket activation protocol
-	if listener == nil {
-		if _, found := os.LookupEnv("LISTEN_PID"); !found {
-			return nil, errors.Errorf("Cannot create API Server, no listener provided and socket activation protocol is not active.")
-		}
-
-		listeners, err := activation.Listeners()
-		if err != nil {
-			return nil, errors.Wrap(err, "Cannot retrieve file descriptors from systemd")
-		}
-		if len(listeners) != 1 {
-			return nil, errors.Errorf("Wrong number of file descriptors for socket activation protocol (%d != 1)", len(listeners))
-		}
-		listener = &listeners[0]
-	}
-	if corsHeaders == "" {
+func newServer(runtime *libpod.Runtime, listener net.Listener, opts entities.ServiceOptions) (*APIServer, error) {
+	logrus.Infof("API service listening on %q. URI: %q", listener.Addr(), runtime.RemoteURI())
+	if opts.CorsHeaders == "" {
 		logrus.Debug("CORS Headers were not set")
 	} else {
-		logrus.Debugf("CORS Headers were set to %s", corsHeaders)
+		logrus.Debugf("CORS Headers were set to %q", opts.CorsHeaders)
 	}
 
-	logrus.Infof("API server listening on %q", (*listener).Addr())
 	router := mux.NewRouter().UseEncodedPath()
-	idle := idle.NewTracker(duration)
+	tracker := idle.NewTracker(opts.Timeout)
 
 	server := APIServer{
 		Server: http.Server{
-			Handler:           router,
-			ReadHeaderTimeout: 20 * time.Second,
-			IdleTimeout:       duration * 2,
-			ConnState:         idle.ConnState,
-			ErrorLog:          log.New(logrus.StandardLogger().Out, "", 0),
+			ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+				return context.WithValue(ctx, types.ConnKey, c)
+			},
+			ConnState:   tracker.ConnState,
+			ErrorLog:    log.New(logrus.StandardLogger().Out, "", 0),
+			Handler:     router,
+			IdleTimeout: opts.Timeout * 2,
 		},
-		Decoder:     handlers.NewAPIDecoder(),
-		idleTracker: idle,
-		Listener:    *listener,
-		Runtime:     runtime,
-		CorsHeaders: corsHeaders,
+		CorsHeaders:     opts.CorsHeaders,
+		Listener:        listener,
+		PProfAddr:       opts.PProfAddr,
+		idleTracker:     tracker,
+		tlsCertFile:     opts.TLSCertFile,
+		tlsKeyFile:      opts.TLSKeyFile,
+		tlsClientCAFile: opts.TLSClientCAFile,
 	}
 
+	server.BaseContext = func(l net.Listener) context.Context {
+		ctx := context.WithValue(context.Background(), types.DecoderKey, handlers.NewAPIDecoder())
+		ctx = context.WithValue(ctx, types.CompatDecoderKey, handlers.NewCompatAPIDecoder())
+		ctx = context.WithValue(ctx, types.RuntimeKey, runtime)
+		ctx = context.WithValue(ctx, types.IdleTrackerKey, tracker)
+		return ctx
+	}
+
+	if opts.TLSClientCAFile != "" {
+		logrus.Debugf("will validate client certs against %s", opts.TLSClientCAFile)
+		pool, err := tlsutil.ReadCertBundle(opts.TLSClientCAFile)
+		if err != nil {
+			return nil, err
+		}
+		server.TLSConfig = &tls.Config{
+			ClientCAs:  pool,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+		}
+	}
+
+	// Capture panics and print stack traces for diagnostics,
+	// additionally process X-Reference-Id Header to support event correlation
+	router.Use(panicHandler(), referenceIDHandler())
 	router.NotFoundHandler = http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			// We can track user errors...
@@ -121,6 +131,7 @@ func newServer(runtime *libpod.Runtime, duration time.Duration, listener *net.Li
 
 	for _, fn := range []func(*mux.Router) error{
 		server.registerAuthHandlers,
+		server.registerArtifactHandlers,
 		server.registerArchiveHandlers,
 		server.registerContainersHandlers,
 		server.registerDistributionHandlers,
@@ -134,11 +145,11 @@ func newServer(runtime *libpod.Runtime, duration time.Duration, listener *net.Li
 		server.registerMonitorHandlers,
 		server.registerNetworkHandlers,
 		server.registerPingHandlers,
-		server.registerPlayHandlers,
+		server.registerKubeHandlers,
 		server.registerPluginsHandlers,
 		server.registerPodsHandlers,
 		server.registerSecretHandlers,
-		server.RegisterSwaggerHandlers,
+		server.registerSwaggerHandlers,
 		server.registerSwarmHandlers,
 		server.registerSystemHandlers,
 		server.registerVersionHandlers,
@@ -150,7 +161,9 @@ func newServer(runtime *libpod.Runtime, duration time.Duration, listener *net.Li
 	}
 
 	if logrus.IsLevelEnabled(logrus.TraceLevel) {
-		router.Walk(func(route *mux.Route, r *mux.Router, ancestors []*mux.Route) error { // nolint
+		// If in trace mode log request and response bodies
+		router.Use(loggingHandler())
+		_ = router.Walk(func(route *mux.Route, r *mux.Router, ancestors []*mux.Route) error {
 			path, err := route.GetPathTemplate()
 			if err != nil {
 				path = "<N/A>"
@@ -167,33 +180,43 @@ func newServer(runtime *libpod.Runtime, duration time.Duration, listener *net.Li
 	return &server, nil
 }
 
-// If the NOTIFY_SOCKET is set, communicate the PID and readiness, and
-// further unset NOTIFY_SOCKET to prevent containers from sending
-// messages and unset INVOCATION_ID so conmon and containers are in
-// the correct cgroup.
-func setupSystemd() {
-	if len(os.Getenv("NOTIFY_SOCKET")) == 0 {
+// setupSystemd notifies systemd API service is ready
+// If the NOTIFY_SOCKET is set, communicate the PID and readiness, and unset INVOCATION_ID
+// so conmon and containers are in the correct cgroup.  Also unset NOTIFY_SOCKET
+// to avoid any further usage of the socket.
+func (s *APIServer) setupSystemd() {
+	if _, found := os.LookupEnv("NOTIFY_SOCKET"); !found {
 		return
 	}
+
 	payload := fmt.Sprintf("MAINPID=%d\n", os.Getpid())
 	payload += daemon.SdNotifyReady
 	if sent, err := daemon.SdNotify(true, payload); err != nil {
-		logrus.Errorf("Error notifying systemd of Conmon PID: %s", err.Error())
+		logrus.Errorf("API service failed to notify systemd of Conmon PID: %v", err)
 	} else if !sent {
-		logrus.Warn("SDNotify not sent successfully")
+		logrus.Warn("API service unable to successfully send SDNotify")
 	}
 
 	if err := os.Unsetenv("INVOCATION_ID"); err != nil {
-		logrus.Errorf("Error unsetting INVOCATION_ID: %s", err.Error())
+		logrus.Errorf("API service failed unsetting INVOCATION_ID: %v", err)
+	}
+	if err := os.Unsetenv("NOTIFY_SOCKET"); err != nil {
+		logrus.Errorf("API service failed unsetting NOTIFY_SOCKET: %v", err)
 	}
 }
 
 // Serve starts responding to HTTP requests.
 func (s *APIServer) Serve() error {
-	setupSystemd()
+	s.setupPprof()
 
-	if err := shutdown.Register("server", func(sig os.Signal) error {
-		return s.Shutdown()
+	if err := shutdown.Register("service", func(sig os.Signal) error {
+		err := s.Shutdown(true)
+		if err == nil {
+			// For `systemctl stop podman.service` support, exit code should be 0
+			// but only if we did indeed gracefully shutdown
+			shutdown.SetExitCode(0)
+		}
+		return err
 	}); err != nil {
 		return err
 	}
@@ -202,36 +225,29 @@ func (s *APIServer) Serve() error {
 		return err
 	}
 
-	errChan := make(chan error, 1)
-
 	go func() {
 		<-s.idleTracker.Done()
-		logrus.Debugf("API Server idle for %s", s.idleTracker.Duration.Round(time.Second).String())
-		_ = s.Shutdown()
+		logrus.Debugf("API service(s) shutting down, idle for %ds", int(s.idleTracker.Duration.Seconds()))
+		_ = s.Shutdown(false)
 	}()
 
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		go func() {
-			pprofMux := mux.NewRouter()
-			pprofMux.PathPrefix("/debug/pprof").Handler(http.DefaultServeMux)
-			goRuntime.SetMutexProfileFraction(1)
-			goRuntime.SetBlockProfileRate(1)
-			s.pprof = &http.Server{Addr: "localhost:8888", Handler: pprofMux}
-			err := s.pprof.ListenAndServe()
-			if err != nil && err != http.ErrServerClosed {
-				logrus.Warn("Profiler Service failed: " + err.Error())
-			}
-		}()
-	}
+	// Before we start serving, ensure umask is properly set for container creation.
+	_ = syscall.Umask(0o022)
 
-	// Before we start serving, ensure umask is properly set for container
-	// creation.
-	_ = syscall.Umask(0022)
-
+	errChan := make(chan error, 1)
+	s.setupSystemd()
 	go func() {
-		err := s.Server.Serve(s.Listener)
+		var err error
+		if s.tlsClientCAFile != "" || (s.tlsCertFile != "" && s.tlsKeyFile != "") {
+			if s.tlsCertFile != "" && s.tlsKeyFile != "" {
+				logrus.Debugf("serving TLS with cert %s and key %s", s.tlsCertFile, s.tlsKeyFile)
+			}
+			err = s.Server.ServeTLS(s.Listener, s.tlsCertFile, s.tlsKeyFile)
+		} else {
+			err = s.Server.Serve(s.Listener)
+		}
 		if err != nil && err != http.ErrServerClosed {
-			errChan <- errors.Wrap(err, "failed to start API server")
+			errChan <- fmt.Errorf("failed to start API service: %w", err)
 			return
 		}
 		errChan <- nil
@@ -240,50 +256,65 @@ func (s *APIServer) Serve() error {
 	return <-errChan
 }
 
+// setupPprof enables pprof default endpoints
+// Note: These endpoints and the podman flag --cpu-profile are mutually exclusive
+//
+// Examples:
+// #1 go tool pprof -http localhost:8889 localhost:8888/debug/pprof/heap?seconds=120
+// Note: web page will only render after a sample has been recorded
+// #2 curl http://localhost:8888/debug/pprof/heap > heap.pprof && go tool pprof heap.pprof
+func (s *APIServer) setupPprof() {
+	if s.PProfAddr == "" {
+		return
+	}
+
+	logrus.Infof("pprof service listening on %q", s.PProfAddr)
+	go func() {
+		old := runtime.SetMutexProfileFraction(1)
+		defer runtime.SetMutexProfileFraction(old)
+
+		runtime.SetBlockProfileRate(1)
+		defer runtime.SetBlockProfileRate(0)
+
+		router := mux.NewRouter()
+		router.PathPrefix("/debug/pprof/").HandlerFunc(pprof.Index)
+
+		err := http.ListenAndServe(s.PProfAddr, router)
+		if err != nil && err != http.ErrServerClosed {
+			logrus.Warnf("pprof service failed: %v", err)
+		}
+	}()
+}
+
 // Shutdown is a clean shutdown waiting on existing clients
-func (s *APIServer) Shutdown() error {
-	if s.idleTracker.Duration == UnlimitedServiceDuration {
-		logrus.Debug("APIServer.Shutdown ignored as Duration is UnlimitedService")
+func (s *APIServer) Shutdown(halt bool) error {
+	switch {
+	case halt:
+		logrus.Debug("API service forced shutdown, ignoring timeout Duration")
+	case s.idleTracker.Duration == UnlimitedServiceDuration:
+		logrus.Debug("API service shutdown request ignored as timeout Duration is UnlimitedService")
 		return nil
 	}
 
 	shutdownOnce.Do(func() {
-		if logrus.IsLevelEnabled(logrus.DebugLevel) {
-			_, file, line, _ := goRuntime.Caller(1)
-			logrus.Debugf("APIServer.Shutdown by %s:%d, %d/%d connection(s)",
-				file, line, s.idleTracker.ActiveConnections(), s.idleTracker.TotalConnections())
-
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), s.idleTracker.Duration)
-				go func() {
-					defer cancel()
-					if err := s.pprof.Shutdown(ctx); err != nil {
-						logrus.Warn(
-							errors.Wrapf(err, "failed to cleanly shutdown pprof Server"))
-					}
-				}()
-				<-ctx.Done()
-			}()
-		}
+		logrus.Debugf("API service shutdown, %d/%d connection(s)",
+			s.idleTracker.ActiveConnections(), s.idleTracker.TotalConnections())
 
 		// Gracefully shutdown server(s), duration of wait same as idle window
-		ctx, cancel := context.WithTimeout(context.Background(), s.idleTracker.Duration)
+		deadline := 1 * time.Second
+		if s.idleTracker.Duration > 0 {
+			deadline = s.idleTracker.Duration
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), deadline)
 		go func() {
 			defer cancel()
 
 			err := s.Server.Shutdown(ctx)
 			if err != nil && err != context.Canceled && err != http.ErrServerClosed {
-				logrus.Error(
-					errors.Wrapf(err, "failed to cleanly shutdown APIServer"))
+				logrus.Error("Failed to cleanly shutdown API service: " + err.Error())
 			}
 		}()
 		<-ctx.Done()
 	})
-
 	return nil
-}
-
-// Close immediately stops responding to clients and exits
-func (s *APIServer) Close() error {
-	return s.Server.Close()
 }

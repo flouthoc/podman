@@ -1,26 +1,27 @@
+//go:build !remote
+
 package compat
 
 import (
+	"fmt"
 	"net/http"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/events"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/gorilla/schema"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/libpod/events"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/util"
 	jsoniter "github.com/json-iterator/go"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
-// NOTE: this endpoint serves both the docker-compatible one and the new libpod
-// one.
+// GetEvents endpoint serves both the docker-compatible one and the new libpod one
 func GetEvents(w http.ResponseWriter, r *http.Request) {
 	var (
 		fromStart bool
-		decoder   = r.Context().Value("decoder").(*schema.Decoder)
-		runtime   = r.Context().Value("runtime").(*libpod.Runtime)
+		decoder   = utils.GetDecoder(r)
+		runtime   = r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 		json      = jsoniter.ConfigCompatibleWithStandardLibrary // FIXME: this should happen on the package level
 	)
 
@@ -34,7 +35,7 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 		Stream: true,
 	}
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, "failed to parse parameters", http.StatusBadRequest, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
@@ -44,26 +45,26 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 
 	libpodFilters, err := util.FiltersFromRequest(r)
 	if err != nil {
-		utils.Error(w, "failed to parse parameters", http.StatusBadRequest, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse filters for %s: %w", r.URL.String(), err))
 		return
 	}
-	eventChannel := make(chan *events.Event)
-	errorChannel := make(chan error)
+	eventChannel := make(chan events.ReadResult)
 
-	// Start reading events.
-	go func() {
-		readOpts := events.ReadOptions{
-			FromStart:    fromStart,
-			Stream:       query.Stream,
-			Filters:      libpodFilters,
-			EventChannel: eventChannel,
-			Since:        query.Since,
-			Until:        query.Until,
-		}
-		errorChannel <- runtime.Events(r.Context(), readOpts)
-	}()
+	readOpts := events.ReadOptions{
+		FromStart:    fromStart,
+		Stream:       query.Stream,
+		Filters:      libpodFilters,
+		EventChannel: eventChannel,
+		Since:        query.Since,
+		Until:        query.Until,
+	}
+	err = runtime.Events(r.Context(), readOpts)
+	if err != nil {
+		utils.InternalServerError(w, err)
+		return
+	}
 
-	var flush = func() {}
+	flush := func() {}
 	if flusher, ok := w.(http.Flusher); ok {
 		flush = flusher.Flush
 	}
@@ -77,28 +78,42 @@ func GetEvents(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case err := <-errorChannel:
-			if err != nil {
-				// FIXME StatusOK already sent above cannot send 500 here
-				utils.InternalServerError(w, err)
-			}
+		case <-r.Context().Done():
 			return
-		case evt := <-eventChannel:
-			if evt == nil {
+		case evt, ok := <-eventChannel:
+			if !ok {
+				return
+			}
+			if evt.Error != nil {
+				logrus.Errorf("Unable to read event: %q", evt.Error)
+				continue
+			}
+			if evt.Event == nil {
 				continue
 			}
 
-			e := entities.ConvertToEntitiesEvent(*evt)
-			if !utils.IsLibpodRequest(r) && e.Status == "died" {
+			e := entities.ConvertToEntitiesEvent(*evt.Event)
+			// Some events differ between Libpod and Docker endpoints.
+			// Handle these differences for Docker-compat.
+			if !utils.IsLibpodRequest(r) && e.Type == "image" && e.Action == "remove" {
+				// Status is deprecated, but we still like to set it for consumers that might use it.
+				//nolint:staticcheck,nolintlint // we run the linter several times and sometimes it
+				// complains about this and sometimes it doesn't thus the nolintlint
+				e.Status = "delete"
+				e.Action = "delete"
+			}
+			if !utils.IsLibpodRequest(r) && e.Action == "died" {
+				//nolint:staticcheck,nolintlint // we run the linter several times and sometimes it
+				// complains about this and sometimes it doesn't thus the nolintlint
 				e.Status = "die"
+				e.Action = "die"
+				e.Actor.Attributes["exitCode"] = e.Actor.Attributes["containerExitCode"]
 			}
 
 			if err := coder.Encode(e); err != nil {
-				logrus.Errorf("unable to write json: %q", err)
+				logrus.Errorf("Unable to write json: %q", err)
 			}
 			flush()
-		case <-r.Context().Done():
-			return
 		}
 	}
 }

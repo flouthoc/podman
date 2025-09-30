@@ -1,15 +1,19 @@
+//go:build !remote
+
 package abi
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/entities/reports"
-	"github.com/containers/podman/v3/pkg/domain/filters"
-	"github.com/containers/podman/v3/pkg/domain/infra/abi/parse"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/domain/entities/reports"
+	"github.com/containers/podman/v5/pkg/domain/filters"
+	"github.com/containers/podman/v5/pkg/domain/infra/abi/parse"
 )
 
 func (ic *ContainerEngine) VolumeCreate(ctx context.Context, opts entities.VolumeCreateOptions) (*entities.IDOrNameResponse, error) {
@@ -32,6 +36,18 @@ func (ic *ContainerEngine) VolumeCreate(ctx context.Context, opts entities.Volum
 		}
 		volumeOptions = append(volumeOptions, parsedOptions...)
 	}
+
+	if opts.IgnoreIfExists {
+		volumeOptions = append(volumeOptions, libpod.WithVolumeIgnoreIfExist())
+	}
+
+	if opts.UID != nil {
+		volumeOptions = append(volumeOptions, libpod.WithVolumeUID(*opts.UID), libpod.WithVolumeNoChown())
+	}
+	if opts.GID != nil {
+		volumeOptions = append(volumeOptions, libpod.WithVolumeGID(*opts.GID), libpod.WithVolumeNoChown())
+	}
+
 	vol, err := ic.Libpod.NewVolume(ctx, volumeOptions...)
 	if err != nil {
 		return nil, err
@@ -55,6 +71,9 @@ func (ic *ContainerEngine) VolumeRm(ctx context.Context, namesOrIds []string, op
 		for _, id := range namesOrIds {
 			vol, err := ic.Libpod.LookupVolume(id)
 			if err != nil {
+				if opts.Ignore && errors.Is(err, define.ErrNoSuchVolume) {
+					continue
+				}
 				reports = append(reports, &entities.VolumeRmReport{
 					Err: err,
 					Id:  id,
@@ -66,7 +85,7 @@ func (ic *ContainerEngine) VolumeRm(ctx context.Context, namesOrIds []string, op
 	}
 	for _, vol := range vols {
 		reports = append(reports, &entities.VolumeRmReport{
-			Err: ic.Libpod.RemoveVolume(ctx, vol, opts.Force),
+			Err: ic.Libpod.RemoveVolume(ctx, vol, opts.Force, opts.Timeout),
 			Id:  vol.Name(),
 		})
 	}
@@ -91,11 +110,11 @@ func (ic *ContainerEngine) VolumeInspect(ctx context.Context, namesOrIds []strin
 		for _, v := range namesOrIds {
 			vol, err := ic.Libpod.LookupVolume(v)
 			if err != nil {
-				if errors.Cause(err) == define.ErrNoSuchVolume {
-					errs = append(errs, errors.Errorf("no such volume %s", v))
+				if errors.Is(err, define.ErrNoSuchVolume) {
+					errs = append(errs, fmt.Errorf("no such volume %s", v))
 					continue
 				} else {
-					return nil, nil, errors.Wrapf(err, "error inspecting volume %s", v)
+					return nil, nil, fmt.Errorf("inspecting volume %s: %w", v, err)
 				}
 			}
 			vols = append(vols, vol)
@@ -116,11 +135,15 @@ func (ic *ContainerEngine) VolumeInspect(ctx context.Context, namesOrIds []strin
 }
 
 func (ic *ContainerEngine) VolumePrune(ctx context.Context, options entities.VolumePruneOptions) ([]*reports.PruneReport, error) {
-	filterFuncs, err := filters.GenerateVolumeFilters(options.Filters)
-	if err != nil {
-		return nil, err
+	funcs := []libpod.VolumeFilter{}
+	for filter, filterValues := range options.Filters {
+		filterFunc, err := filters.GenerateVolumeFilters(filter, filterValues, ic.Libpod)
+		if err != nil {
+			return nil, err
+		}
+		funcs = append(funcs, filterFunc)
 	}
-	return ic.pruneVolumesHelper(ctx, filterFuncs)
+	return ic.pruneVolumesHelper(ctx, funcs)
 }
 
 func (ic *ContainerEngine) pruneVolumesHelper(ctx context.Context, filterFuncs []libpod.VolumeFilter) ([]*reports.PruneReport, error) {
@@ -132,10 +155,15 @@ func (ic *ContainerEngine) pruneVolumesHelper(ctx context.Context, filterFuncs [
 }
 
 func (ic *ContainerEngine) VolumeList(ctx context.Context, opts entities.VolumeListOptions) ([]*entities.VolumeListReport, error) {
-	volumeFilters, err := filters.GenerateVolumeFilters(opts.Filter)
-	if err != nil {
-		return nil, err
+	volumeFilters := []libpod.VolumeFilter{}
+	for filter, value := range opts.Filter {
+		filterFunc, err := filters.GenerateVolumeFilters(filter, value, ic.Libpod)
+		if err != nil {
+			return nil, err
+		}
+		volumeFilters = append(volumeFilters, filterFunc)
 	}
+
 	vols, err := ic.Libpod.Volumes(volumeFilters...)
 	if err != nil {
 		return nil, err
@@ -144,6 +172,9 @@ func (ic *ContainerEngine) VolumeList(ctx context.Context, opts entities.VolumeL
 	for _, v := range vols {
 		inspectOut, err := v.Inspect()
 		if err != nil {
+			if errors.Is(err, define.ErrNoSuchVolume) {
+				continue
+			}
 			return nil, err
 		}
 		config := entities.VolumeConfigResponse{
@@ -161,4 +192,90 @@ func (ic *ContainerEngine) VolumeExists(ctx context.Context, nameOrID string) (*
 		return nil, err
 	}
 	return &entities.BoolReport{Value: exists}, nil
+}
+
+// Volumemounted check if a given volume using plugin or filesystem is mounted or not.
+func (ic *ContainerEngine) VolumeMounted(ctx context.Context, nameOrID string) (*entities.BoolReport, error) {
+	vol, err := ic.Libpod.LookupVolume(nameOrID)
+	if err != nil {
+		return nil, err
+	}
+	mountCount, err := vol.MountCount()
+	if err != nil {
+		// FIXME: this error should probably be returned
+		return &entities.BoolReport{Value: false}, nil //nolint: nilerr
+	}
+	if mountCount > 0 {
+		return &entities.BoolReport{Value: true}, nil
+	}
+	return &entities.BoolReport{Value: false}, nil
+}
+
+func (ic *ContainerEngine) VolumeMount(ctx context.Context, nameOrIDs []string) ([]*entities.VolumeMountReport, error) {
+	reports := []*entities.VolumeMountReport{}
+	for _, name := range nameOrIDs {
+		report := entities.VolumeMountReport{Id: name}
+		vol, err := ic.Libpod.LookupVolume(name)
+		if err != nil {
+			report.Err = err
+		} else {
+			report.Path, report.Err = vol.Mount()
+		}
+		reports = append(reports, &report)
+	}
+
+	return reports, nil
+}
+
+func (ic *ContainerEngine) VolumeUnmount(ctx context.Context, nameOrIDs []string) ([]*entities.VolumeUnmountReport, error) {
+	reports := []*entities.VolumeUnmountReport{}
+	for _, name := range nameOrIDs {
+		report := entities.VolumeUnmountReport{Id: name}
+		vol, err := ic.Libpod.LookupVolume(name)
+		if err != nil {
+			report.Err = err
+		} else {
+			report.Err = vol.Unmount()
+		}
+		reports = append(reports, &report)
+	}
+
+	return reports, nil
+}
+
+func (ic *ContainerEngine) VolumeReload(ctx context.Context) (*entities.VolumeReloadReport, error) {
+	report := ic.Libpod.UpdateVolumePlugins(ctx)
+	return &entities.VolumeReloadReport{VolumeReload: *report}, nil
+}
+
+func (ic *ContainerEngine) VolumeExport(ctx context.Context, nameOrID string, options entities.VolumeExportOptions) error {
+	vol, err := ic.Libpod.LookupVolume(nameOrID)
+	if err != nil {
+		return err
+	}
+
+	contents, err := vol.Export()
+	if err != nil {
+		return err
+	}
+	defer contents.Close()
+
+	if _, err := io.Copy(options.Output, contents); err != nil {
+		return fmt.Errorf("writing volume %s contents: %w", vol.Name(), err)
+	}
+
+	return nil
+}
+
+func (ic *ContainerEngine) VolumeImport(ctx context.Context, nameOrID string, options entities.VolumeImportOptions) error {
+	vol, err := ic.Libpod.LookupVolume(nameOrID)
+	if err != nil {
+		return err
+	}
+
+	if err := vol.Import(options.Input); err != nil {
+		return err
+	}
+
+	return nil
 }

@@ -1,11 +1,11 @@
 package errorhandling
 
 import (
+	"errors"
 	"os"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -28,7 +28,7 @@ func JoinErrors(errs []error) error {
 
 	finalErr := multiE.ErrorOrNil()
 	if finalErr == nil {
-		return finalErr
+		return nil
 	}
 	return errors.New(strings.TrimSpace(finalErr.Error()))
 }
@@ -59,28 +59,26 @@ func StringsToErrors(strErrs []string) []error {
 	return errs
 }
 
-// SyncQuiet syncs a file and logs any error. Should only be used within
-// a defer.
-func SyncQuiet(f *os.File) {
-	if err := f.Sync(); err != nil {
-		logrus.Errorf("unable to sync file %s: %q", f.Name(), err)
-	}
-}
-
 // CloseQuiet closes a file and logs any error. Should only be used within
 // a defer.
 func CloseQuiet(f *os.File) {
 	if err := f.Close(); err != nil {
-		logrus.Errorf("unable to close file %s: %q", f.Name(), err)
+		logrus.Errorf("Unable to close file %s: %q", f.Name(), err)
 	}
 }
 
 // Contains checks if err's message contains sub's message. Contains should be
 // used iff either err or sub has lost type information (e.g., due to
-// marshaling).  For typed errors, please use `errors.Contains(...)` or `Is()`
+// marshalling).  For typed errors, please use `errors.Contains(...)` or `Is()`
 // in recent version of Go.
 func Contains(err error, sub error) bool {
 	return strings.Contains(err.Error(), sub.Error())
+}
+
+// PodConflictErrorModel is used in remote connections with podman
+type PodConflictErrorModel struct {
+	Errs []string
+	Id   string
 }
 
 // ErrorModel is used in remote connections with podman
@@ -91,7 +89,8 @@ type ErrorModel struct {
 	// human error message, formatted for a human to read
 	// example: human error message
 	Message string `json:"message"`
-	// http response code
+	// HTTP response code
+	// min: 400
 	ResponseCode int `json:"response"`
 }
 
@@ -105,4 +104,31 @@ func (e ErrorModel) Cause() error {
 
 func (e ErrorModel) Code() int {
 	return e.ResponseCode
+}
+
+func (e PodConflictErrorModel) Error() string {
+	return strings.Join(e.Errs, ",")
+}
+
+func (e PodConflictErrorModel) Code() int {
+	return 409
+}
+
+// Cause returns the most underlying error for the provided one. There is a
+// maximum error depth of 100 to avoid endless loops. An additional error log
+// message will be created if this maximum has reached.
+func Cause(err error) (cause error) {
+	cause = err
+
+	const maxDepth = 100
+	for i := 0; i <= maxDepth; i++ {
+		res := errors.Unwrap(cause)
+		if res == nil {
+			return cause
+		}
+		cause = res
+	}
+
+	logrus.Errorf("Max error depth of %d reached, cannot unwrap until root cause: %v", maxDepth, err)
+	return cause
 }

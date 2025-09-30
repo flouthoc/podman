@@ -1,13 +1,13 @@
 package images
 
 import (
+	"errors"
 	"fmt"
 
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/errorhandling"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -16,7 +16,7 @@ var (
 	rmDescription = "Removes one or more previously pulled or locally created images."
 	rmCmd         = &cobra.Command{
 		Use:               "rm [options] IMAGE [IMAGE...]",
-		Short:             "Removes one or more images from local storage",
+		Short:             "Remove one or more images from local storage",
 		Long:              rmDescription,
 		RunE:              rm,
 		ValidArgsFunction: common.AutocompleteImages,
@@ -56,20 +56,26 @@ func init() {
 
 func imageRemoveFlagSet(flags *pflag.FlagSet) {
 	flags.BoolVarP(&imageOpts.All, "all", "a", false, "Remove all images")
+	flags.BoolVarP(&imageOpts.Ignore, "ignore", "i", false, "Ignore errors if a specified image does not exist")
 	flags.BoolVarP(&imageOpts.Force, "force", "f", false, "Force Removal of the image")
+	flags.BoolVar(&imageOpts.NoPrune, "no-prune", false, "Do not remove dangling images")
 }
 
 func rm(cmd *cobra.Command, args []string) error {
 	if len(args) < 1 && !imageOpts.All {
-		return errors.Errorf("image name or ID must be specified")
+		return errors.New("image name or ID must be specified")
 	}
 	if len(args) > 0 && imageOpts.All {
-		return errors.Errorf("when using the --all switch, you may not pass any images names or IDs")
+		return errors.New("when using the --all switch, you may not pass any images names or IDs")
+	}
+
+	if imageOpts.Force {
+		imageOpts.Ignore = true
 	}
 
 	// Note: certain image-removal errors are non-fatal.  Hence, the report
 	// might be set even if err != nil.
-	report, rmErrors := registry.ImageEngine().Remove(registry.GetContext(), args, imageOpts)
+	report, rmErrors := registry.ImageEngine().Remove(registry.Context(), args, imageOpts)
 	if report != nil {
 		for _, u := range report.Untagged {
 			fmt.Println("Untagged: " + u)
@@ -80,6 +86,8 @@ func rm(cmd *cobra.Command, args []string) error {
 				fmt.Println("Deleted: " + d)
 			}
 		}
+	}
+	if len(rmErrors) > 0 {
 		registry.SetExitCode(report.ExitCode)
 	}
 

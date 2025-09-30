@@ -161,7 +161,7 @@ accessed:
 127.0.0.1 - - [04/Mar/2020 11:18:21] "GET /alpine@sha256=e9b65ef660a3ff91d28cc50eba84f21798a6c5c39b4dd165047db49e84ae1fb9/signature-1 HTTP/1.1" 200 -
 ```
 
-As an counterpart example, if we specify the wrong key at `/tmp/key.gpg`:
+As a counterpart example, if we specify the wrong key at `/tmp/key.gpg`:
 
 ```bash
 gpg --output /tmp/key.gpg --armor --export mail@saschagrunert.de
@@ -173,7 +173,7 @@ Then a pull is not possible any more:
 ```bash
 sudo podman pull --tls-verify=false localhost:5000/alpine
 Trying to pull localhost:5000/alpine...
-Error: error pulling image "localhost:5000/alpine": unable to pull localhost:5000/alpine: unable to pull image: Source image rejected: Invalid GPG signature: …
+Error: pulling image "localhost:5000/alpine": unable to pull localhost:5000/alpine: unable to pull image: Source image rejected: Invalid GPG signature: …
 ```
 
 So in general there are four main things to be taken into consideration when

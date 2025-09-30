@@ -1,21 +1,23 @@
-// +build !linux
+//go:build !remote && !linux
 
 package libpod
 
-import "github.com/containers/podman/v3/libpod/define"
+import (
+	"context"
+)
 
 // createTimer systemd timers for healthchecks of a container
-func (c *Container) createTimer() error {
-	return define.ErrNotImplemented
+func (c *Container) createTimer(interval string, isStartup bool) error {
+	return nil
 }
 
 // startTimer starts a systemd timer for the healthchecks
-func (c *Container) startTimer() error {
-	return define.ErrNotImplemented
+func (c *Container) startTimer(isStartup bool) error {
+	return nil
 }
 
-// removeTimer removes the systemd timer and unit files
+// removeTransientFiles removes the systemd timer and unit files
 // for the container
-func (c *Container) removeTimer() error {
-	return define.ErrNotImplemented
+func (c *Container) removeTransientFiles(ctx context.Context, isStartup bool, unitName string) error {
+	return nil
 }

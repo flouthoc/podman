@@ -3,16 +3,14 @@ package containers
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -49,7 +47,7 @@ var (
 	commitOptions = entities.CommitOptions{
 		ImageName: "",
 	}
-	iidFile string
+	configFile, iidFile string
 )
 
 func commitFlags(cmd *cobra.Command) {
@@ -58,6 +56,10 @@ func commitFlags(cmd *cobra.Command) {
 	changeFlagName := "change"
 	flags.StringArrayVarP(&commitOptions.Changes, changeFlagName, "c", []string{}, "Apply the following possible instructions to the created image (default []): "+strings.Join(common.ChangeCmds, " | "))
 	_ = cmd.RegisterFlagCompletionFunc(changeFlagName, common.AutocompleteChangeInstructions)
+
+	configFileFlagName := "config"
+	flags.StringVar(&configFile, configFileFlagName, "", "`file` containing a container configuration to merge into the image")
+	_ = cmd.RegisterFlagCompletionFunc(configFileFlagName, completion.AutocompleteDefault)
 
 	formatFlagName := "format"
 	flags.StringVarP(&commitOptions.Format, formatFlagName, "f", "oci", "`Format` of the image manifest and metadata")
@@ -77,6 +79,7 @@ func commitFlags(cmd *cobra.Command) {
 
 	flags.BoolVarP(&commitOptions.Pause, "pause", "p", false, "Pause container during commit")
 	flags.BoolVarP(&commitOptions.Quiet, "quiet", "q", false, "Suppress output")
+	flags.BoolVarP(&commitOptions.Squash, "squash", "s", false, "squash newly built layers into a single new layer")
 	flags.BoolVar(&commitOptions.IncludeVolumes, "include-volumes", false, "Include container volumes as image volumes")
 }
 
@@ -94,21 +97,27 @@ func init() {
 }
 
 func commit(cmd *cobra.Command, args []string) error {
-	container := args[0]
+	container := strings.TrimPrefix(args[0], "/")
 	if len(args) == 2 {
 		commitOptions.ImageName = args[1]
 	}
 	if !commitOptions.Quiet {
 		commitOptions.Writer = os.Stderr
 	}
-
+	if len(configFile) > 0 {
+		cfg, err := os.ReadFile(configFile)
+		if err != nil {
+			return fmt.Errorf("--config: %w", err)
+		}
+		commitOptions.Config = cfg
+	}
 	response, err := registry.ContainerEngine().ContainerCommit(context.Background(), container, commitOptions)
 	if err != nil {
 		return err
 	}
 	if len(iidFile) > 0 {
-		if err = ioutil.WriteFile(iidFile, []byte(response.Id), 0644); err != nil {
-			return errors.Wrap(err, "failed to write image ID")
+		if err = os.WriteFile(iidFile, []byte(response.Id), 0644); err != nil {
+			return fmt.Errorf("failed to write image ID: %w", err)
 		}
 	}
 	fmt.Println(response.Id)

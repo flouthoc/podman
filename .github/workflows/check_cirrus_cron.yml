@@ -11,74 +11,82 @@ on:
         # N/B: This should correspond to a period slightly after
         # the last job finishes running.  See job defs. at:
         # https://cirrus-ci.com/settings/repository/6707778565701632
-        - cron:  '59 23 * * 1-5'
+        - cron:  '03 03 * * 1-5'
     # Debug: Allow triggering job manually in github-actions WebUI
     workflow_dispatch: {}
+    # Allow reuse of this workflow by other repositories
+    # Ref: https://docs.github.com/en/actions/using-workflows/reusing-workflows
+    workflow_call:
+      secrets:
+        SECRET_CIRRUS_API_KEY:
+          required : true
+        ACTION_MAIL_SERVER:
+          required: true
+        ACTION_MAIL_USERNAME:
+          required: true
+        ACTION_MAIL_PASSWORD:
+          required: true
+        ACTION_MAIL_SENDER:
+          required: true
 
 env:
-    # Debug-mode can reveal secrets, only enable by a secret value.
-    # Ref: https://help.github.com/en/actions/configuring-and-managing-workflows/managing-a-workflow-run#enabling-step-debug-logging
-    ACTIONS_STEP_DEBUG: '${{ secrets.ACTIONS_STEP_DEBUG }}'
-    # File with CSV listing of zero or more e-mail addresses for delivery
-    # of daily failure notice e-mails.
-    FAILMAILCSV: './contrib/cirrus/cron-fail_addrs.csv'
-    # Filename for table of cron-name to build-id data
+    # CSV listing of e-mail addresses for delivery failure or error notices
+    RCPTCSV: podman-monitor@lists.podman.io
+    # Filename for table of build-id to cron-name data
     # (must be in $GITHUB_WORKSPACE/artifacts/)
-    NAME_ID_FILEPATH: './artifacts/name_id.txt'
+    ID_NAME_FILEPATH: './artifacts/id_name.txt'
+
+permissions:
+  contents: read
 
 jobs:
     cron_failures:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v2
+            # This is where the scripts live
+            - uses: actions/checkout@v5
               with:
+                  repository: containers/podman
+                  ref: 'main'
                   persist-credentials: false
 
             - name: Get failed cron names and Build IDs
               id: cron
-              run: './.github/actions/${{ github.workflow }}/${{ github.job }}.sh'
+              run: './.github/actions/check_cirrus_cron/cron_failures.sh'
 
             - if: steps.cron.outputs.failures > 0
               shell: bash
-              # Must be inline, since context expressions are used.
-              # Ref: https://docs.github.com/en/free-pro-team@latest/actions/reference/context-and-expression-syntax-for-github-actions
-              run: |
-                set -eo pipefail
-                (
-                echo "Detected one or more Cirrus-CI cron-triggered jobs have failed recently:"
-                echo ""
-
-                while read -r NAME BID; do
-                    echo "Cron build '$NAME' Failed: https://cirrus-ci.com/build/$BID"
-                done < "$NAME_ID_FILEPATH"
-
-                echo ""
-                echo "# Source: ${{ github.workflow }} workflow on ${{ github.repository }}."
-                # Separate content from sendgrid.com automatic footer.
-                echo ""
-                echo ""
-                ) > ./artifacts/email_body.txt
+              run: './.github/actions/check_cirrus_cron/make_email_body.sh'
 
             - if: steps.cron.outputs.failures > 0
-              id: mailto
-              run: printf "::set-output name=csv::%s\n" $(cat "$FAILMAILCSV")
-
-            - if: steps.mailto.outputs.csv != ''
               name: Send failure notification e-mail
               # Ref: https://github.com/dawidd6/action-send-mail
-              uses: dawidd6/action-send-mail@v2.2.2
+              uses: dawidd6/action-send-mail@v3.12.0
               with:
                 server_address: ${{secrets.ACTION_MAIL_SERVER}}
                 server_port: 465
                 username: ${{secrets.ACTION_MAIL_USERNAME}}
                 password: ${{secrets.ACTION_MAIL_PASSWORD}}
                 subject: Cirrus-CI cron build failures on ${{github.repository}}
-                to: ${{steps.mailto.outputs.csv}}
+                to: ${{env.RCPTCSV}}
                 from: ${{secrets.ACTION_MAIL_SENDER}}
                 body: file://./artifacts/email_body.txt
 
             - if: always()
-              uses: actions/upload-artifact@v2
+              uses: actions/upload-artifact@v4
               with:
                   name: ${{ github.job }}_artifacts
                   path: artifacts/*
+
+            - if: failure()
+              name: Send error notification e-mail
+              uses: dawidd6/action-send-mail@v3.12.0
+              with:
+                server_address: ${{secrets.ACTION_MAIL_SERVER}}
+                server_port: 465
+                username: ${{secrets.ACTION_MAIL_USERNAME}}
+                password: ${{secrets.ACTION_MAIL_PASSWORD}}
+                subject: Github workflow error on ${{github.repository}}
+                to: ${{env.RCPTCSV}}
+                from: ${{secrets.ACTION_MAIL_SENDER}}
+                body: "Job failed: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"

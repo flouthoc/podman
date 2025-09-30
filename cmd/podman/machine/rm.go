@@ -1,16 +1,14 @@
-// +build amd64,linux arm64,linux amd64,darwin arm64,darwin
+//go:build amd64 || arm64
 
 package machine
 
 import (
-	"bufio"
-	"fmt"
-	"os"
-	"strings"
-
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/machine"
-	"github.com/containers/podman/v3/pkg/machine/qemu"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/libpod/events"
+	"github.com/containers/podman/v5/pkg/machine"
+	"github.com/containers/podman/v5/pkg/machine/env"
+	"github.com/containers/podman/v5/pkg/machine/shim"
+	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/spf13/cobra"
 )
 
@@ -19,15 +17,16 @@ var (
 		Use:               "rm [options] [MACHINE]",
 		Short:             "Remove an existing machine",
 		Long:              "Remove a managed virtual machine ",
+		PersistentPreRunE: machinePreRunE,
 		RunE:              rm,
 		Args:              cobra.MaximumNArgs(1),
-		Example:           `podman machine rm myvm`,
+		Example:           `podman machine rm podman-machine-default`,
 		ValidArgsFunction: autocompleteMachine,
 	}
 )
 
 var (
-	destoryOptions machine.RemoveOptions
+	destroyOptions machine.RemoveOptions
 )
 
 func init() {
@@ -38,52 +37,37 @@ func init() {
 
 	flags := rmCmd.Flags()
 	formatFlagName := "force"
-	flags.BoolVar(&destoryOptions.Force, formatFlagName, false, "Do not prompt before rming")
-
-	keysFlagName := "save-keys"
-	flags.BoolVar(&destoryOptions.SaveKeys, keysFlagName, false, "Do not delete SSH keys")
+	flags.BoolVarP(&destroyOptions.Force, formatFlagName, "f", false, "Stop and do not prompt before rming")
 
 	ignitionFlagName := "save-ignition"
-	flags.BoolVar(&destoryOptions.SaveIgnition, ignitionFlagName, false, "Do not delete ignition file")
+	flags.BoolVar(&destroyOptions.SaveIgnition, ignitionFlagName, false, "Do not delete ignition file")
 
 	imageFlagName := "save-image"
-	flags.BoolVar(&destoryOptions.SaveImage, imageFlagName, false, "Do not delete the image file")
+	flags.BoolVar(&destroyOptions.SaveImage, imageFlagName, false, "Do not delete the image file")
 }
 
-func rm(cmd *cobra.Command, args []string) error {
+func rm(_ *cobra.Command, args []string) error {
 	var (
-		err    error
-		vm     machine.VM
-		vmType string
+		err error
 	)
 	vmName := defaultMachineName
 	if len(args) > 0 && len(args[0]) > 0 {
 		vmName = args[0]
 	}
-	switch vmType {
-	default:
-		vm, err = qemu.LoadVMByName(vmName)
-	}
-	if err != nil {
-		return err
-	}
-	confirmationMessage, remove, err := vm.Remove(vmName, machine.RemoveOptions{})
+
+	dirs, err := env.GetMachineDirs(provider.VMType())
 	if err != nil {
 		return err
 	}
 
-	if !destoryOptions.Force {
-		// Warn user
-		fmt.Println(confirmationMessage)
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("Are you sure you want to continue? [y/N] ")
-		answer, err := reader.ReadString('\n')
-		if err != nil {
-			return err
-		}
-		if strings.ToLower(answer)[0] != 'y' {
-			return nil
-		}
+	mc, err := vmconfigs.LoadMachineByName(vmName, dirs)
+	if err != nil {
+		return err
 	}
-	return remove()
+
+	if err := shim.Remove(mc, provider, dirs, destroyOptions); err != nil {
+		return err
+	}
+	newMachineEvent(events.Remove, events.Event{Name: vmName})
+	return nil
 }

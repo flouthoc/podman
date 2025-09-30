@@ -1,4 +1,4 @@
-% podman-pod-unpause(1)
+% podman-pod-unpause 1
 
 ## NAME
 podman\-pod\-unpause - Unpause one or more pods
@@ -17,16 +17,22 @@ Unpause all pods.
 
 #### **--latest**, **-l**
 
-Instead of providing the pod name or ID, unpause the last created pod. (This option is not available with the remote Podman client)
+Instead of providing the pod name or ID, unpause the last created pod. (This option is not available with the remote Podman client, including Mac and Windows (excluding WSL2) machines)
 
 ## EXAMPLE
 
+Unpause pod with a given name:
+```
 podman pod unpause mywebserverpod
+```
 
+Unpause pod with a given ID:
+```
 podman pod unpause 860a4b23
+```
 
 ## SEE ALSO
-podman-pod(1), podman-pod-pause(1), podman-unpause(1)
+**[podman(1)](podman.1.md)**, **[podman-pod(1)](podman-pod.1.md)**, **[podman-pod-pause(1)](podman-pod-pause.1.md)**
 
 ## HISTORY
 July 2018, Originally compiled by Peter Hunt <pehunt@redhat.com>

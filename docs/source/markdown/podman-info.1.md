@@ -1,7 +1,7 @@
-% podman-info(1)
+% podman-info 1
 
 ## NAME
-podman\-info - Displays Podman related system information
+podman\-info - Display Podman related system information
 
 ## SYNOPSIS
 **podman info** [*options*]
@@ -15,39 +15,45 @@ Displays information pertinent to the host, current storage stats, configured co
 
 ## OPTIONS
 
-#### **--debug**, **-D**
-
-Show additional information
-
-#### **--format**=*format*, **-f**
+#### **--format**, **-f**=*format*
 
 Change output format to "json" or a Go template.
 
+| **Placeholder**     | **Info pertaining to ...**              |
+| ------------------- | --------------------------------------- |
+| .Host ...           | ...the host on which podman is running  |
+| .Plugins ...        | ...external plugins                     |
+| .Registries ...     | ...configured registries                |
+| .Store ...          | ...the storage driver and paths         |
+| .Version ...        | ...podman version                       |
 
-## EXAMPLE
+Each of the above branch out into further subfields, more than can
+reasonably be enumerated in this document.
 
-Run podman info with plain text response:
+## EXAMPLES
+
+Run `podman info` for a YAML formatted response:
 ```
 $ podman info
 host:
   arch: amd64
-  buildahVersion: 1.19.0-dev
-  cgroupControllers:
-  - cpuset
-  - cpu
-  - io
-  - memory
-  - pids
+  buildahVersion: 1.23.0
+  cgroupControllers: []
   cgroupManager: systemd
   cgroupVersion: v2
   conmon:
-    package: conmon-2.0.22-2.fc33.x86_64
+    package: conmon-2.0.29-2.fc34.x86_64
     path: /usr/bin/conmon
-    version: 'conmon version 2.0.22, commit: 1be6c73605006a85f7ed60b7f76a51e28eb67e01'
+    version: 'conmon version 2.0.29, commit: '
+ cpu_utilization:
+   idle_percent: 96.84
+   system_percent: 0.71
+   user_percent: 2.45
   cpus: 8
   distribution:
     distribution: fedora
-    version: "33"
+    variant: workstation
+    version: "34"
   eventLogger: journald
   hostname: localhost.localdomain
   idMappings:
@@ -65,221 +71,334 @@ host:
     - container_id: 1
       host_id: 100000
       size: 65536
-  kernel: 5.9.11-200.fc33.x86_64
+  kernel: 5.13.13-200.fc34.x86_64
   linkmode: dynamic
-  memFree: 837505024
-  memTotal: 16416481280
+  logDriver: journald
+  memFree: 1833385984
+  memTotal: 16401895424
+  networkBackend: cni
+  networkBackendInfo:
+    backend: cni
+    dns:
+      package: podman-plugins-3.4.4-1.fc34.x86_64
+      path: /usr/libexec/cni/dnsname
+      version: |-
+        CNI dnsname plugin
+        version: 1.3.1
+        commit: unknown
+    package: |-
+      containernetworking-plugins-1.0.1-1.fc34.x86_64
+      podman-plugins-3.4.4-1.fc34.x86_64
+    path: /usr/libexec/cni
   ociRuntime:
     name: crun
-    package: crun-0.16-1.fc33.x86_64
+    package: crun-1.0-1.fc34.x86_64
     path: /usr/bin/crun
     version: |-
-      crun version 0.16
-      commit: eb0145e5ad4d8207e84a327248af76663d4e50dd
+      crun version 1.0
+      commit: 139dc6971e2f1d931af520188763e984d6cdfbf8
       spec: 1.0.0
-      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +YAJL
+      +SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +YAJL
   os: linux
+  pasta:
+    executable: /usr/bin/passt
+    package: passt-0^20221116.gace074c-1.fc34.x86_64
+    version: |
+      passt 0^20221116.gace074c-1.fc34.x86_64
+      Copyright Red Hat
+      GNU Affero GPL version 3 or later <https://www.gnu.org/licenses/agpl-3.0.html>
+      This is free software: you are free to change and redistribute it.
+      There is NO WARRANTY, to the extent permitted by law.
   remoteSocket:
-    exists: true
     path: /run/user/3267/podman/podman.sock
   security:
     apparmorEnabled: false
-    capabilities: CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT
+    capabilities: CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID
     rootless: true
     seccompEnabled: true
+    seccompProfilePath: /usr/share/containers/seccomp.json
     selinuxEnabled: true
+  serviceIsRemote: false
   slirp4netns:
     executable: /bin/slirp4netns
-    package: slirp4netns-1.1.4-4.dev.giteecccdb.fc33.x86_64
+    package: slirp4netns-1.1.12-2.fc34.x86_64
     version: |-
-      slirp4netns version 1.1.4+dev
-      commit: eecccdb96f587b11d7764556ffacfeaffe4b6e11
-      libslirp: 4.3.1
+      slirp4netns version 1.1.12
+      commit: 7a104a101aa3278a2152351a082a6df71f57c9a3
+      libslirp: 4.4.0
       SLIRP_CONFIG_VERSION_MAX: 3
       libseccomp: 2.5.0
-  swapFree: 6509203456
-  swapTotal: 12591292416
-  uptime: 264h 14m 32.73s (Approximately 11.00 days)
+  swapFree: 15687475200
+  swapTotal: 16886259712
+  uptime: 47h 15m 9.91s (Approximately 1.96 days)
+plugins:
+  log:
+  - k8s-file
+  - none
+  - journald
+  network:
+  - bridge
+  - macvlan
+  volume:
+  - local
 registries:
   search:
   - registry.fedoraproject.org
   - registry.access.redhat.com
-  - registry.centos.org
   - docker.io
+  - quay.io
 store:
   configFile: /home/dwalsh/.config/containers/storage.conf
   containerStore:
-    number: 3
+    number: 9
     paused: 0
-    running: 0
-    stopped: 3
+    running: 1
+    stopped: 8
   graphDriverName: overlay
-  graphOptions:
-    overlay.mount_program:
-      Executable: /home/dwalsh/bin/fuse-overlayfs
-      Package: Unknown
-      Version: |-
-        fusermount3 version: 3.9.3
-        fuse-overlayfs: version 0.7.2
-        FUSE library version 3.9.3
-        using FUSE kernel interface version 7.31
+  graphOptions: {}
   graphRoot: /home/dwalsh/.local/share/containers/storage
+  graphRootAllocated: 510389125120
+  graphRootUsed: 129170714624
   graphStatus:
     Backing Filesystem: extfs
-    Native Overlay Diff: "false"
+    Native Overlay Diff: "true"
     Supports d_type: "true"
     Using metacopy: "false"
+  imageCopyTmpDir: /home/dwalsh/.local/share/containers/storage/tmp
   imageStore:
-    number: 77
+    number: 5
   runRoot: /run/user/3267/containers
+  transientStore: false
   volumePath: /home/dwalsh/.local/share/containers/storage/volumes
 version:
-  APIVersion: 3.0.0
-  Built: 1608562922
-  BuiltTime: Mon Dec 21 10:02:02 2020
-  GitCommit: d6925182cdaf94225908a386d02eae8fd3e01123-dirty
-  GoVersion: go1.15.5
+  APIVersion: 4.0.0
+  Built: 1631648722
+  BuiltTime: Tue Sep 14 15:45:22 2021
+  GitCommit: 23677f92dd83e96d2bc8f0acb611865fb8b1a56d
+  GoVersion: go1.16.6
   OsArch: linux/amd64
-  Version: 3.0.0-dev
+  Version: 4.0.0
+```
 
+Run `podman info --format json` for a JSON formatted response:
 ```
-Run podman info with JSON formatted response:
-```
+$ podman info --format json
 {
   "host": {
     "arch": "amd64",
-    "buildahVersion": "1.19.0-dev",
+    "buildahVersion": "1.23.0",
     "cgroupManager": "systemd",
     "cgroupVersion": "v2",
-    "cgroupControllers": [
-      "cpuset",
-      "cpu",
-      "io",
-      "memory",
-      "pids"
-    ],
+    "cgroupControllers": [],
     "conmon": {
-      "package": "conmon-2.0.22-2.fc33.x86_64",
+      "package": "conmon-2.0.29-2.fc34.x86_64",
       "path": "/usr/bin/conmon",
-      "version": "conmon version 2.0.22, commit: 1be6c73605006a85f7ed60b7f76a51e28eb67e01"
+      "version": "conmon version 2.0.29, commit: "
     },
     "cpus": 8,
     "distribution": {
       "distribution": "fedora",
-      "version": "33"
+      "version": "34"
     },
     "eventLogger": "journald",
     "hostname": "localhost.localdomain",
     "idMappings": {
       "gidmap": [
-        {
-          "container_id": 0,
-          "host_id": 3267,
-          "size": 1
-        },
-        {
-          "container_id": 1,
-          "host_id": 100000,
-          "size": 65536
-        }
+	{
+	  "container_id": 0,
+	  "host_id": 3267,
+	  "size": 1
+	},
+	{
+	  "container_id": 1,
+	  "host_id": 100000,
+	  "size": 65536
+	}
       ],
       "uidmap": [
-        {
-          "container_id": 0,
-          "host_id": 3267,
-          "size": 1
-        },
-        {
-          "container_id": 1,
-          "host_id": 100000,
-          "size": 65536
-        }
+	{
+	  "container_id": 0,
+	  "host_id": 3267,
+	  "size": 1
+	},
+	{
+	  "container_id": 1,
+	  "host_id": 100000,
+	  "size": 65536
+	}
       ]
     },
-    "kernel": "5.9.11-200.fc33.x86_64",
-    "memFree": 894574592,
-    "memTotal": 16416481280,
+    "kernel": "5.13.13-200.fc34.x86_64",
+    "logDriver": "journald",
+    "memFree": 1785753600,
+    "memTotal": 16401895424,
+    "networkBackend": "cni",
+    "networkBackendInfo": {
+      "backend": "cni",
+      "package": "containernetworking-plugins-1.0.1-1.fc34.x86_64\npodman-plugins-3.4.4-1.fc34.x86_64",
+      "path": "/usr/libexec/cni",
+      "dns": {
+        "version": "CNI dnsname plugin\nversion: 1.3.1\ncommit: unknown",
+        "package": "podman-plugins-3.4.4-1.fc34.x86_64",
+        "path": "/usr/libexec/cni/dnsname"
+      }
+    },
     "ociRuntime": {
       "name": "crun",
-      "package": "crun-0.16-1.fc33.x86_64",
+      "package": "crun-1.0-1.fc34.x86_64",
       "path": "/usr/bin/crun",
-      "version": "crun version 0.16\ncommit: eb0145e5ad4d8207e84a327248af76663d4e50dd\nspec: 1.0.0\n+SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +YAJL"
+      "version": "crun version 1.0\ncommit: 139dc6971e2f1d931af520188763e984d6cdfbf8\nspec: 1.0.0\n+SYSTEMD +SELINUX +APPARMOR +CAP +SECCOMP +EBPF +CRIU +YAJL"
     },
     "os": "linux",
     "remoteSocket": {
-      "path": "/run/user/3267/podman/podman.sock",
-      "exists": true
+      "path": "/run/user/3267/podman/podman.sock"
     },
+    "serviceIsRemote": false,
     "security": {
       "apparmorEnabled": false,
-      "capabilities": "CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT",
+      "capabilities": "CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID",
       "rootless": true,
       "seccompEnabled": true,
+      "seccompProfilePath": "/usr/share/containers/seccomp.json",
       "selinuxEnabled": true
     },
     "slirp4netns": {
       "executable": "/bin/slirp4netns",
-      "package": "slirp4netns-1.1.4-4.dev.giteecccdb.fc33.x86_64",
-      "version": "slirp4netns version 1.1.4+dev\ncommit: eecccdb96f587b11d7764556ffacfeaffe4b6e11\nlibslirp: 4.3.1\nSLIRP_CONFIG_VERSION_MAX: 3\nlibseccomp: 2.5.0"
+      "package": "slirp4netns-1.1.12-2.fc34.x86_64",
+      "version": "slirp4netns version 1.1.12\ncommit: 7a104a101aa3278a2152351a082a6df71f57c9a3\nlibslirp: 4.4.0\nSLIRP_CONFIG_VERSION_MAX: 3\nlibseccomp: 2.5.0"
     },
-    "swapFree": 6509203456,
-    "swapTotal": 12591292416,
-    "uptime": "264h 13m 12.39s (Approximately 11.00 days)",
+    "pasta": {
+      "executable": "/usr/bin/passt",
+      "package": "passt-0^20221116.gace074c-1.fc34.x86_64",
+      "version": "passt 0^20221116.gace074c-1.fc34.x86_64\nCopyright Red Hat\nGNU Affero GPL version 3 or later \u003chttps://www.gnu.org/licenses/agpl-3.0.html\u003e\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n"
+    },
+    "swapFree": 15687475200,
+    "swapTotal": 16886259712,
+    "uptime": "47h 17m 29.75s (Approximately 1.96 days)",
     "linkmode": "dynamic"
   },
   "store": {
     "configFile": "/home/dwalsh/.config/containers/storage.conf",
     "containerStore": {
-      "number": 3,
+      "number": 9,
       "paused": 0,
-      "running": 0,
-      "stopped": 3
+      "running": 1,
+      "stopped": 8
     },
     "graphDriverName": "overlay",
     "graphOptions": {
-      "overlay.mount_program": {
-  "Executable": "/home/dwalsh/bin/fuse-overlayfs",
-  "Package": "Unknown",
-  "Version": "fusermount3 version: 3.9.3\nfuse-overlayfs: version 0.7.2\nFUSE library version 3.9.3\nusing FUSE kernel interface version 7.31"
-}
+
     },
     "graphRoot": "/home/dwalsh/.local/share/containers/storage",
     "graphStatus": {
       "Backing Filesystem": "extfs",
-      "Native Overlay Diff": "false",
+      "Native Overlay Diff": "true",
       "Supports d_type": "true",
       "Using metacopy": "false"
     },
+    "imageCopyTmpDir": "/home/dwalsh/.local/share/containers/storage/tmp",
     "imageStore": {
-      "number": 77
+      "number": 5
     },
     "runRoot": "/run/user/3267/containers",
-    "volumePath": "/home/dwalsh/.local/share/containers/storage/volumes"
+    "volumePath": "/home/dwalsh/.local/share/containers/storage/volumes",
+    "transientStore": false
   },
   "registries": {
     "search": [
   "registry.fedoraproject.org",
   "registry.access.redhat.com",
-  "registry.centos.org",
-  "docker.io"
+  "docker.io",
+  "quay.io"
 ]
   },
+  "plugins": {
+    "volume": [
+      "local"
+    ],
+    "network": [
+      "bridge",
+      "macvlan"
+    ],
+    "log": [
+      "k8s-file",
+      "none",
+      "journald"
+    ]
+  },
   "version": {
-    "APIVersion": "3.0.0",
-    "Version": "3.0.0-dev",
-    "GoVersion": "go1.15.5",
-    "GitCommit": "d6925182cdaf94225908a386d02eae8fd3e01123-dirty",
-    "BuiltTime": "Mon Dec 21 10:02:02 2020",
-    "Built": 1608562922,
+    "APIVersion": "4.0.0",
+    "Version": "4.0.0",
+    "GoVersion": "go1.16.6",
+    "GitCommit": "23677f92dd83e96d2bc8f0acb611865fb8b1a56d",
+    "BuiltTime": "Tue Sep 14 15:45:22 2021",
+    "Built": 1631648722,
     "OsArch": "linux/amd64"
   }
 }
 ```
-Run podman info and only get the registries information.
+
+#### Extracting the list of container registries with a Go template
+
+If shell completion is enabled, type `podman info --format={{.` and then press `[TAB]` twice.
+
 ```
-$ podman info --format={{".Registries"}}
-map[registries:[docker.io quay.io registry.fedoraproject.org registry.access.redhat.com]]
+$ podman info --format={{.
+{{.Host.         {{.Plugins.      {{.Registries}}  {{.Store.        {{.Version.
 ```
 
+Press `R` `[TAB]` `[ENTER]` to print the registries information.
+
+```
+$ podman info -f {{.Registries}}
+map[search:[registry.fedoraproject.org registry.access.redhat.com docker.io quay.io]]
+$
+```
+
+The output still contains a map and an array. The map value can be extracted with
+
+```
+$ podman info -f '{{index .Registries "search"}}'
+[registry.fedoraproject.org registry.access.redhat.com docker.io quay.io]
+```
+
+The array can be printed as one entry per line
+
+```
+$ podman info -f '{{range index .Registries "search"}}{{.}}\n{{end}}'
+registry.fedoraproject.org
+registry.access.redhat.com
+docker.io
+quay.io
+
+```
+
+#### Extracting the list of container registries from JSON with jq
+
+The command-line JSON processor [__jq__](https://stedolan.github.io/jq/) can be used to extract the list
+of container registries.
+
+```
+$ podman info -f json | jq '.registries["search"]'
+[
+  "registry.fedoraproject.org",
+  "registry.access.redhat.com",
+  "docker.io",
+  "quay.io"
+]
+```
+
+The array can be printed as one entry per line
+
+```
+$ podman info -f json | jq -r '.registries["search"] | .[]'
+registry.fedoraproject.org
+registry.access.redhat.com
+docker.io
+quay.io
+```
+
+Note, the Go template struct fields start with upper case. When running `podman info` or `podman info --format=json`, the same names start with lower case.
+
 ## SEE ALSO
-podman(1), containers-registries.conf(5), containers-storage.conf(5)
+**[podman(1)](podman.1.md)**, **[containers-registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md)**, **[containers-storage.conf(5)](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md)**

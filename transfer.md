@@ -1,4 +1,4 @@
-![PODMAN logo](logo/podman-logo-source.svg)
+![PODMAN logo](https://raw.githubusercontent.com/containers/common/main/logos/podman-logo-full-vert.png)
 # Podman Usage Transfer
 
 This document outlines useful information for ops and dev transfer as it relates to infrastructure that utilizes `Podman`.
@@ -87,6 +87,7 @@ There are other equivalents for these tools
 | `docker stop`    | [`podman stop`](./docs/source/markdown/podman-stop.1.md)        |
 | `docker system ` | [`podman system`](./docs/source/markdown/podman-system.1.md)    |
 | `docker system df`     | [`podman system df`](./docs/source/markdown/podman-system-df.1.md)      |
+| `docker system events`   | [`podman system events`](./docs/source/markdown/podman-events.1.md)  |
 | `docker system info`   | [`podman system info`](./docs/source/markdown/podman-system-info.1.md)  |
 | `docker system prune`  | [`podman system prune`](./docs/source/markdown/podman-system-prune.1.md)|
 | `docker tag`     | [`podman tag`](./docs/source/markdown/podman-tag.1.md)          |
@@ -141,8 +142,8 @@ The following podman commands do not have a Docker equivalent:
 * [`podman generate `](./docs/source/markdown/podman-generate.1.md)
 * [`podman generate kube`](./docs/source/markdown/podman-generate-kube.1.md)
 * [`podman generate systemd`](./docs/source/markdown/podman-generate-systemd.1.md)
-* [`podman healthcheck `](/docs/source/markdown/podmanh-healthcheck.1.md)
-* [`podman healthcheck run`](/docs/source/markdown/podmanh-healthcheck-run.1.md)
+* [`podman healthcheck `](/docs/source/markdown/podman-healthcheck.1.md)
+* [`podman healthcheck run`](/docs/source/markdown/podman-healthcheck-run.1.md)
 * [`podman image diff`](./docs/source/markdown/podman-image-diff.1.md)
 * [`podman image exists`](./docs/source/markdown/podman-image-exists.1.md)
 * [`podman image mount`](./docs/source/markdown/podman-image-mount.1.md)
@@ -193,7 +194,7 @@ The following podman commands do not have a Docker equivalent:
 * [`podman system renumber`](./docs/source/markdown/podman-system-connection-renumber.1.md)
 * [`podman system reset`](./docs/source/markdown/podman-system-connection-reset.1.md)
 * [`podman system service`](./docs/source/markdown/podman-system-connection-service.1.md)
-* [`podman umount`](./docs/source/markdown/podman-umount.1.md)
+* [`podman unmount`](./docs/source/markdown/podman-unmount.1.md)
 * [`podman unshare`](./docs/source/markdown/podman-unshare.1.md)
 * [`podman untag`](./docs/source/markdown/podman-untag.1.md)
 * [`podman volume exists`](./docs/source/markdown/podman-volume-exists.1.md)

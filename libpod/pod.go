@@ -1,16 +1,19 @@
+//go:build !remote
+
 package libpod
 
 import (
-	"context"
-	"net"
+	"errors"
+	"fmt"
+	"maps"
+	"sort"
+	"strings"
 	"time"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/libpod/lock"
-	"github.com/containers/podman/v3/pkg/specgen"
-	"github.com/cri-o/ocicni/pkg/ocicni"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/libpod/lock"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
+	"go.podman.io/common/pkg/config"
 )
 
 // Pod represents a group of containers that are managed together.
@@ -44,9 +47,9 @@ type PodConfig struct {
 
 	// Labels contains labels applied to the pod
 	Labels map[string]string `json:"labels"`
-	// CgroupParent contains the pod's CGroup parent
+	// CgroupParent contains the pod's Cgroup parent
 	CgroupParent string `json:"cgroupParent"`
-	// UsePodCgroup indicates whether the pod will create its own CGroup and
+	// UsePodCgroup indicates whether the pod will create its own Cgroup and
 	// join containers to it.
 	// If true, all containers joined to the pod will use the pod cgroup as
 	// their cgroup parent, and cannot set a different cgroup parent
@@ -62,7 +65,14 @@ type PodConfig struct {
 	UsePodUTS      bool `json:"sharesUts,omitempty"`
 	UsePodCgroupNS bool `json:"sharesCgroupNS,omitempty"`
 
-	InfraContainer *InfraContainerConfig `json:"infraConfig"`
+	HasInfra bool `json:"hasInfra,omitempty"`
+
+	// ServiceContainerID is the main container of a service.  A service
+	// consists of one or more pods.  The service container is started
+	// before all pods and is stopped when the last pod stops.
+	// The service container allows for tracking and managing the entire
+	// life cycle of service which may be started via `podman-play-kube`.
+	ServiceContainerID string `json:"serviceContainerID,omitempty"`
 
 	// Time pod was created
 	CreatedTime time.Time `json:"created"`
@@ -71,50 +81,29 @@ type PodConfig struct {
 	// container has been created with.
 	CreateCommand []string `json:"CreateCommand,omitempty"`
 
+	// The pod's exit policy.
+	ExitPolicy config.PodExitPolicy `json:"ExitPolicy,omitempty"`
+
+	// The pod's restart policy
+	RestartPolicy string `json:"RestartPolicy,omitempty"`
+
+	// The max number of retries for a pod based on restart policy
+	RestartRetries *uint `json:"RestartRetries,omitempty"`
+
 	// ID of the pod's lock
 	LockID uint32 `json:"lockID"`
+
+	// ResourceLimits hold the pod level resource limits
+	ResourceLimits specs.LinuxResources
 }
 
 // podState represents a pod's state
 type podState struct {
-	// CgroupPath is the path to the pod's CGroup
+	// CgroupPath is the path to the pod's Cgroup
 	CgroupPath string `json:"cgroupPath"`
 	// InfraContainerID is the container that holds pod namespace information
 	// Most often an infra container
 	InfraContainerID string
-}
-
-// InfraContainerConfig is the configuration for the pod's infra container.
-// Generally speaking, these are equivalent to container configuration options
-// you will find in container_config.go (and even named identically), save for
-// HasInfraContainer (which determines if an infra container is even created -
-// if it is false, no other options in this struct will be used) and HostNetwork
-// (this involves the created OCI spec, and as such is not represented directly
-// in container_config.go).
-// Generally speaking, aside from those two exceptions, these options will set
-// the equivalent field in the container's configuration.
-type InfraContainerConfig struct {
-	ConmonPidFile      string                `json:"conmonPidFile"`
-	HasInfraContainer  bool                  `json:"makeInfraContainer"`
-	NoNetwork          bool                  `json:"noNetwork,omitempty"`
-	HostNetwork        bool                  `json:"infraHostNetwork,omitempty"`
-	PidNS              specgen.Namespace     `json:"infraPid,omitempty"`
-	PortBindings       []ocicni.PortMapping  `json:"infraPortBindings"`
-	StaticIP           net.IP                `json:"staticIP,omitempty"`
-	StaticMAC          net.HardwareAddr      `json:"staticMAC,omitempty"`
-	UseImageResolvConf bool                  `json:"useImageResolvConf,omitempty"`
-	DNSServer          []string              `json:"dnsServer,omitempty"`
-	DNSSearch          []string              `json:"dnsSearch,omitempty"`
-	DNSOption          []string              `json:"dnsOption,omitempty"`
-	UseImageHosts      bool                  `json:"useImageHosts,omitempty"`
-	HostAdd            []string              `json:"hostsAdd,omitempty"`
-	Networks           []string              `json:"networks,omitempty"`
-	ExitCommand        []string              `json:"exitCommand,omitempty"`
-	InfraImage         string                `json:"infraImage,omitempty"`
-	InfraCommand       []string              `json:"infraCommand,omitempty"`
-	Slirp4netns        bool                  `json:"slirp4netns,omitempty"`
-	NetworkOptions     map[string][]string   `json:"network_options,omitempty"`
-	ResourceLimits     *specs.LinuxResources `json:"resource_limits,omitempty"`
 }
 
 // ID retrieves the pod's ID
@@ -127,6 +116,18 @@ func (p *Pod) Name() string {
 	return p.config.Name
 }
 
+// MountLabel returns the SELinux label associated with the pod
+func (p *Pod) MountLabel() (string, error) {
+	if !p.HasInfraContainer() {
+		return "", nil
+	}
+	ctr, err := p.infraContainer()
+	if err != nil {
+		return "", err
+	}
+	return ctr.MountLabel(), nil
+}
+
 // Namespace returns the pod's libpod namespace.
 // Namespaces are used to logically separate containers and pods in the state.
 func (p *Pod) Namespace() string {
@@ -136,53 +137,157 @@ func (p *Pod) Namespace() string {
 // ResourceLim returns the cpuset resource limits for the pod
 func (p *Pod) ResourceLim() *specs.LinuxResources {
 	resCopy := &specs.LinuxResources{}
-	if err := JSONDeepCopy(p.config.InfraContainer.ResourceLimits, resCopy); err != nil {
-		return nil
-	}
-	if resCopy != nil && resCopy.CPU != nil {
-		return resCopy
-	}
 	empty := &specs.LinuxResources{
 		CPU: &specs.LinuxCPU{},
 	}
+	if err := JSONDeepCopy(p.config.ResourceLimits, resCopy); err != nil {
+		return nil
+	}
+	if resCopy.CPU != nil {
+		return resCopy
+	}
+
 	return empty
 }
 
 // CPUPeriod returns the pod CPU period
 func (p *Pod) CPUPeriod() uint64 {
-	resCopy := &specs.LinuxResources{}
-	if err := JSONDeepCopy(p.config.InfraContainer.ResourceLimits, resCopy); err != nil {
+	resLim := p.ResourceLim()
+	if resLim.CPU == nil || resLim.CPU.Period == nil {
 		return 0
 	}
-	if resCopy != nil && resCopy.CPU != nil && resCopy.CPU.Period != nil {
-		return *resCopy.CPU.Period
-	}
-	return 0
+	return *resLim.CPU.Period
 }
 
 // CPUQuota returns the pod CPU quota
 func (p *Pod) CPUQuota() int64 {
-	resCopy := &specs.LinuxResources{}
-	if err := JSONDeepCopy(p.config.InfraContainer.ResourceLimits, resCopy); err != nil {
+	resLim := p.ResourceLim()
+	if resLim.CPU == nil || resLim.CPU.Quota == nil {
 		return 0
 	}
-	if resCopy != nil && resCopy.CPU != nil && resCopy.CPU.Quota != nil {
-		return *resCopy.CPU.Quota
-	}
-	return 0
+	return *resLim.CPU.Quota
 }
 
-// PidMode returns the PID mode given by the user ex: pod, private...
-func (p *Pod) PidMode() string {
-	return string(p.config.InfraContainer.PidNS.NSMode)
+// MemoryLimit returns the pod Memory Limit
+func (p *Pod) MemoryLimit() uint64 {
+	resLim := p.ResourceLim()
+	if resLim.Memory == nil || resLim.Memory.Limit == nil {
+		return 0
+	}
+	return uint64(*resLim.Memory.Limit)
+}
+
+// MemorySwap returns the pod Memory swap limit
+func (p *Pod) MemorySwap() uint64 {
+	resLim := p.ResourceLim()
+	if resLim.Memory == nil || resLim.Memory.Swap == nil {
+		return 0
+	}
+	return uint64(*resLim.Memory.Swap)
+}
+
+// BlkioWeight returns the pod blkio weight
+func (p *Pod) BlkioWeight() uint64 {
+	resLim := p.ResourceLim()
+	if resLim.BlockIO == nil || resLim.BlockIO.Weight == nil {
+		return 0
+	}
+	return uint64(*resLim.BlockIO.Weight)
+}
+
+// CPUSetMems returns the pod CPUSet memory nodes
+func (p *Pod) CPUSetMems() string {
+	resLim := p.ResourceLim()
+	if resLim.CPU == nil {
+		return ""
+	}
+	return resLim.CPU.Mems
+}
+
+// CPUShares returns the pod cpu shares
+func (p *Pod) CPUShares() uint64 {
+	resLim := p.ResourceLim()
+	if resLim.CPU == nil || resLim.CPU.Shares == nil {
+		return 0
+	}
+	return *resLim.CPU.Shares
+}
+
+// BlkiThrottleReadBps returns the pod  throttle devices
+func (p *Pod) BlkiThrottleReadBps() []define.InspectBlkioThrottleDevice {
+	resLim := p.ResourceLim()
+	if resLim.BlockIO == nil || resLim.BlockIO.ThrottleReadBpsDevice == nil {
+		return []define.InspectBlkioThrottleDevice{}
+	}
+	devs, err := blkioDeviceThrottle(nil, resLim.BlockIO.ThrottleReadBpsDevice)
+	if err != nil {
+		return []define.InspectBlkioThrottleDevice{}
+	}
+	return devs
+}
+
+// BlkiThrottleWriteBps returns the pod  throttle devices
+func (p *Pod) BlkiThrottleWriteBps() []define.InspectBlkioThrottleDevice {
+	resLim := p.ResourceLim()
+	if resLim.BlockIO == nil || resLim.BlockIO.ThrottleWriteBpsDevice == nil {
+		return []define.InspectBlkioThrottleDevice{}
+	}
+	devs, err := blkioDeviceThrottle(nil, resLim.BlockIO.ThrottleWriteBpsDevice)
+	if err != nil {
+		return []define.InspectBlkioThrottleDevice{}
+	}
+	return devs
+}
+
+// NetworkMode returns the Network mode given by the user ex: pod, private...
+func (p *Pod) NetworkMode() string {
+	infra, err := p.runtime.GetContainer(p.state.InfraContainerID)
+	if err != nil {
+		return ""
+	}
+	return infra.NetworkMode()
+}
+
+// Namespace Mode returns the given NS mode provided by the user ex: host, private...
+func (p *Pod) NamespaceMode(kind specs.LinuxNamespaceType) string {
+	infra, err := p.runtime.GetContainer(p.state.InfraContainerID)
+	if err != nil {
+		return ""
+	}
+	ctrSpec := infra.config.Spec
+	if ctrSpec != nil && ctrSpec.Linux != nil {
+		for _, ns := range ctrSpec.Linux.Namespaces {
+			if ns.Type == kind {
+				if ns.Path != "" {
+					return fmt.Sprintf("ns:%s", ns.Path)
+				}
+				return "private"
+			}
+		}
+		return "host"
+	}
+	return ""
+}
+
+// CPUQuota returns the pod CPU quota
+func (p *Pod) VolumesFrom() []string {
+	if p.state.InfraContainerID == "" {
+		return nil
+	}
+	infra, err := p.runtime.GetContainer(p.state.InfraContainerID)
+	if err != nil {
+		return nil
+	}
+	if ctrs, ok := infra.config.Spec.Annotations[define.VolumesFromAnnotation]; ok {
+		return strings.Split(ctrs, ";")
+	}
+	return nil
 }
 
 // Labels returns the pod's labels
 func (p *Pod) Labels() map[string]string {
 	labels := make(map[string]string)
-	for key, value := range p.config.Labels {
-		labels[key] = value
-	}
+	maps.Copy(labels, p.config.Labels)
 
 	return labels
 }
@@ -198,7 +303,7 @@ func (p *Pod) CreateCommand() []string {
 	return p.config.CreateCommand
 }
 
-// CgroupParent returns the pod's CGroup parent
+// CgroupParent returns the pod's Cgroup parent
 func (p *Pod) CgroupParent() string {
 	return p.config.CgroupParent
 }
@@ -250,37 +355,12 @@ func (p *Pod) Hostname() string {
 	return p.config.Hostname
 }
 
-// CgroupPath returns the path to the pod's CGroup
+// CgroupPath returns the path to the pod's Cgroup
 func (p *Pod) CgroupPath() (string, error) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 	if err := p.updatePod(); err != nil {
 		return "", err
-	}
-	if p.state.CgroupPath != "" {
-		return p.state.CgroupPath, nil
-	}
-	if !p.HasInfraContainer() {
-		return "", errors.Wrap(define.ErrNoSuchCtr, "pod has no infra container")
-	}
-
-	id := p.state.InfraContainerID
-
-	if id != "" {
-		ctr, err := p.runtime.state.Container(id)
-		if err != nil {
-			return "", errors.Wrapf(err, "could not get infra")
-		}
-		if ctr != nil {
-			ctr.Start(context.Background(), false)
-			cgroupPath, err := ctr.CGroupPath()
-			if err != nil {
-				return "", errors.Wrapf(err, "could not get container cgroup")
-			}
-			p.state.CgroupPath = cgroupPath
-			p.save()
-			return cgroupPath, nil
-		}
 	}
 	return p.state.CgroupPath, nil
 }
@@ -322,7 +402,7 @@ func (p *Pod) allContainers() ([]*Container, error) {
 
 // HasInfraContainer returns whether the pod will create an infra container
 func (p *Pod) HasInfraContainer() bool {
-	return p.config.InfraContainer.HasInfraContainer
+	return p.config.HasInfra
 }
 
 // SharesNamespaces checks if the pod has any kernel namespaces set as shared. An infra container will not be
@@ -331,31 +411,40 @@ func (p *Pod) SharesNamespaces() bool {
 	return p.SharesPID() || p.SharesIPC() || p.SharesNet() || p.SharesMount() || p.SharesUser() || p.SharesUTS()
 }
 
+// infraContainerID returns the infra ID without a lock
+func (p *Pod) infraContainerID() (string, error) {
+	if err := p.updatePod(); err != nil {
+		return "", err
+	}
+	return p.state.InfraContainerID, nil
+}
+
 // InfraContainerID returns the infra container ID for a pod.
 // If the container returned is "", the pod has no infra container.
 func (p *Pod) InfraContainerID() (string, error) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
+	return p.infraContainerID()
+}
 
-	if err := p.updatePod(); err != nil {
-		return "", err
+// infraContainer is the unlocked version of InfraContainer which returns the infra container
+func (p *Pod) infraContainer() (*Container, error) {
+	id, err := p.infraContainerID()
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, fmt.Errorf("pod has no infra container: %w", define.ErrNoSuchCtr)
 	}
 
-	return p.state.InfraContainerID, nil
+	return p.runtime.state.Container(id)
 }
 
 // InfraContainer returns the infra container.
 func (p *Pod) InfraContainer() (*Container, error) {
-	if !p.HasInfraContainer() {
-		return nil, errors.Wrap(define.ErrNoSuchCtr, "pod has no infra container")
-	}
-
-	id, err := p.InfraContainerID()
-	if err != nil {
-		return nil, err
-	}
-
-	return p.runtime.state.Container(id)
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	return p.infraContainer()
 }
 
 // TODO add pod batching
@@ -369,11 +458,7 @@ type PodContainerStats struct {
 }
 
 // GetPodStats returns the stats for each of its containers
-func (p *Pod) GetPodStats(previousContainerStats map[string]*define.ContainerStats) (map[string]*define.ContainerStats, error) {
-	var (
-		ok       bool
-		prevStat *define.ContainerStats
-	)
+func (p *Pod) GetPodStats() (map[string]*define.ContainerStats, error) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
@@ -386,18 +471,15 @@ func (p *Pod) GetPodStats(previousContainerStats map[string]*define.ContainerSta
 	}
 	newContainerStats := make(map[string]*define.ContainerStats)
 	for _, c := range containers {
-		if prevStat, ok = previousContainerStats[c.ID()]; !ok {
-			prevStat = &define.ContainerStats{}
-		}
-		newStats, err := c.GetContainerStats(prevStat)
-		// If the container wasn't running, don't include it
-		// but also suppress the error
-		if err != nil && errors.Cause(err) != define.ErrCtrStateInvalid {
+		newStats, err := c.GetContainerStats(nil)
+		if err != nil {
+			// If the container wasn't running ignore it
+			if errors.Is(err, define.ErrCtrStateInvalid) || errors.Is(err, define.ErrCtrStopped) {
+				continue
+			}
 			return nil, err
 		}
-		if err == nil {
-			newContainerStats[c.ID()] = newStats
-		}
+		newContainerStats[c.ID()] = newStats
 	}
 	return newContainerStats, nil
 }
@@ -407,15 +489,47 @@ func (p *Pod) ProcessLabel() (string, error) {
 	if !p.HasInfraContainer() {
 		return "", nil
 	}
-
-	id, err := p.InfraContainerID()
-	if err != nil {
-		return "", err
-	}
-
-	ctr, err := p.runtime.state.Container(id)
+	ctr, err := p.infraContainer()
 	if err != nil {
 		return "", err
 	}
 	return ctr.ProcessLabel(), nil
+}
+
+// initContainers returns the list of initcontainers
+// in a pod sorted by create time
+func (p *Pod) initContainers() ([]*Container, error) {
+	initCons := make([]*Container, 0)
+	// the pod is already locked when this is called
+	cons, err := p.allContainers()
+	if err != nil {
+		return nil, err
+	}
+	// Sort the pod containers by created time
+	sort.Slice(cons, func(i, j int) bool { return cons[i].CreatedTime().Before(cons[j].CreatedTime()) })
+	// Iterate sorted containers and add ids for any init containers
+	for _, c := range cons {
+		if len(c.config.InitContainerType) > 0 {
+			initCons = append(initCons, c)
+		}
+	}
+	return initCons, nil
+}
+
+func (p *Pod) Config() (*PodConfig, error) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	conf := &PodConfig{}
+
+	err := JSONDeepCopy(p.config, conf)
+
+	return conf, err
+}
+
+// ConfigNoCopy returns the configuration used by the pod.
+// Note that the returned value is not a copy and must hence
+// only be used in a reading fashion.
+func (p *Pod) ConfigNoCopy() *PodConfig {
+	return p.config
 }

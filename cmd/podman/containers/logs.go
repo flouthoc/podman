@@ -1,16 +1,18 @@
 package containers
 
 import (
+	"errors"
+	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 // logsOptionsWrapper wraps entities.LogsOptions and prevents leaking
@@ -19,6 +21,8 @@ type logsOptionsWrapper struct {
 	entities.ContainerLogsOptions
 
 	SinceRaw string
+
+	UntilRaw string
 }
 
 var (
@@ -62,6 +66,7 @@ var (
 		ValidArgsFunction: logsCommand.ValidArgsFunction,
 		Example: `podman container logs ctrID
 		podman container logs --names ctrID1 ctrID2
+		podman container logs --color --names ctrID1 ctrID2
 		podman container logs --tail 2 mywebserver
 		podman container logs --follow=true --since 10m ctrID
 		podman container logs mywebserver mydbserver`,
@@ -101,26 +106,40 @@ func logsFlags(cmd *cobra.Command) {
 	flags.StringVar(&logsOptions.SinceRaw, sinceFlagName, "", "Show logs since TIMESTAMP")
 	_ = cmd.RegisterFlagCompletionFunc(sinceFlagName, completion.AutocompleteNone)
 
+	untilFlagName := "until"
+	flags.StringVar(&logsOptions.UntilRaw, untilFlagName, "", "Show logs until TIMESTAMP")
+	_ = cmd.RegisterFlagCompletionFunc(untilFlagName, completion.AutocompleteNone)
+
 	tailFlagName := "tail"
 	flags.Int64Var(&logsOptions.Tail, tailFlagName, -1, "Output the specified number of LINES at the end of the logs.  Defaults to -1, which prints all lines")
 	_ = cmd.RegisterFlagCompletionFunc(tailFlagName, completion.AutocompleteNone)
 
 	flags.BoolVarP(&logsOptions.Timestamps, "timestamps", "t", false, "Output the timestamps in the log")
+	flags.BoolVarP(&logsOptions.Colors, "color", "", false, "Output the containers with different colors in the log.")
 	flags.BoolVarP(&logsOptions.Names, "names", "n", false, "Output the container name in the log")
-	flags.SetInterspersed(false)
+
 	_ = flags.MarkHidden("details")
 }
 
 func logs(_ *cobra.Command, args []string) error {
+	args = utils.RemoveSlash(args)
 	if logsOptions.SinceRaw != "" {
 		// parse time, error out if something is wrong
-		since, err := util.ParseInputTime(logsOptions.SinceRaw)
+		since, err := util.ParseInputTime(logsOptions.SinceRaw, true)
 		if err != nil {
-			return errors.Wrapf(err, "error parsing --since %q", logsOptions.SinceRaw)
+			return fmt.Errorf("parsing --since %q: %w", logsOptions.SinceRaw, err)
 		}
 		logsOptions.Since = since
 	}
+	if logsOptions.UntilRaw != "" {
+		// parse time, error out if something is wrong
+		until, err := util.ParseInputTime(logsOptions.UntilRaw, false)
+		if err != nil {
+			return fmt.Errorf("parsing --until %q: %w", logsOptions.UntilRaw, err)
+		}
+		logsOptions.Until = until
+	}
 	logsOptions.StdoutWriter = os.Stdout
 	logsOptions.StderrWriter = os.Stderr
-	return registry.ContainerEngine().ContainerLogs(registry.GetContext(), args, logsOptions.ContainerLogsOptions)
+	return registry.ContainerEngine().ContainerLogs(registry.Context(), args, logsOptions.ContainerLogsOptions)
 }

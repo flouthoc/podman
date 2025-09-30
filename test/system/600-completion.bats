@@ -8,6 +8,16 @@
 
 load helpers
 
+function setup() {
+    # $PODMAN may be a space-separated string, e.g. if we include a --url.
+    local -a podman_as_array=($PODMAN)
+    # __completeNoDesc must be the first arg if we running the completion cmd
+    # set the var for the run_completion function
+    PODMAN_COMPLETION="${podman_as_array[0]} __completeNoDesc ${podman_as_array[@]:1}"
+
+    basic_setup
+}
+
 # Returns true if we are able to podman-pause
 function _can_pause() {
     # Even though we're just trying completion, not an actual unpause,
@@ -27,6 +37,11 @@ function check_shell_completion() {
 "
 
     for cmd in $(_podman_commands "$@"); do
+        # Skip the compose command which is calling `docker-compose --help`
+        # and hence won't match the assumptions made below.
+        if [[ "$cmd" == "compose" ]]; then
+            continue
+        fi
         # Human-readable podman command string, with multiple spaces collapsed
         name="podman"
         if is_remote; then
@@ -40,7 +55,7 @@ function check_shell_completion() {
 
         # The line immediately after 'Usage:' gives us a 1-line synopsis
         usage=$(echo "$full_help" | grep -A1 '^Usage:' | tail -1)
-        [ -n "$usage" ] || die "podman $cmd: no Usage message found"
+        assert "$usage" != "" "podman $cmd: no Usage message found"
 
         # If usage ends in '[command]', recurse into subcommands
         if expr "$usage" : '.*\[command\]$' >/dev/null; then
@@ -74,7 +89,8 @@ function check_shell_completion() {
                         # If this fails there is most likely a problem with the cobra library
                         is "${lines[0]}" "--.*" \
                            "$* $cmd: flag(s) listed in suggestions"
-                        [ ${#lines[@]} -gt 2 ] || die "$* $cmd: No flag suggestions"
+                        assert "${#lines[@]}" -gt 2 \
+                               "$* $cmd: No flag suggestions"
                         _check_completion_end NoFileComp
                     fi
                     # continue the outer for args loop
@@ -87,8 +103,14 @@ function check_shell_completion() {
                         continue 2
                     fi
 
+                    name=$random_container_name
+                    # special case podman cp suggest containers names with a colon
+                    if [[ $cmd = "cp" ]]; then
+                        name="$name:"
+                    fi
+
                     run_completion "$@" $cmd "${extra_args[@]}" ""
-                    is "$output" ".*-$random_container_name${nl}" \
+                    is "$output" ".*-$name${nl}" \
                        "$* $cmd: actual container listed in suggestions"
 
                     match=true
@@ -110,12 +132,10 @@ function check_shell_completion() {
                     is "$output" ".*localhost/$random_image_name:$random_image_tag${nl}" \
                        "$* $cmd: actual image listed in suggestions"
 
-                    # check that we complete the image with and without tag after at least one char is typed
+                    # check that we complete the image with tag after at least one char is typed
                     run_completion "$@" $cmd "${extra_args[@]}" "${random_image_name:0:1}"
                     is "$output" ".*$random_image_name:$random_image_tag${nl}" \
                        "$* $cmd: image name:tag included in suggestions"
-                    is "$output" ".*$random_image_name${nl}" \
-                       "$* $cmd: image name(w/o tag) included in suggestions"
 
                     # check that we complete the image id after at least two chars are typed
                     run_completion "$@" $cmd "${extra_args[@]}" "${random_image_id:0:2}"
@@ -148,10 +168,10 @@ function check_shell_completion() {
 
                 *REGISTRY*)
                     run_completion "$@" $cmd "${extra_args[@]}" ""
-                    ### FIXME how can we get the configured registries?
                     _check_completion_end NoFileComp
-                    ### FIXME this fails if no registries are configured
-                    [[ ${#lines[@]} -gt 2 ]] || die "$* $cmd: No REGISTRIES found in suggestions"
+                    assert "${#lines[@]}" -gt 2 "$* $cmd: No REGISTRIES found in suggestions"
+                    # We can assume quay.io as we force our own CONTAINERS_REGISTRIES_CONF below.
+                    assert "${lines[0]}" == "quay.io" "unqualified-search-registries from registries.conf listed"
 
                     match=true
                     # resume
@@ -176,7 +196,7 @@ function check_shell_completion() {
                         _check_completion_end NoSpace
                     else
                         _check_completion_end Default
-                        [[ ${#lines[@]} -eq 2 ]] || die "$* $cmd: Suggestions are in the output"
+                        _check_no_suggestions
                     fi
                     ;;
 
@@ -193,8 +213,8 @@ function check_shell_completion() {
 
                 i=$(($i + 1))
                 # If the argument ends with ...] than we accept 0...n args
-                # Loop three times to make sure we are not only completing the first arg
-                if [[ ! ${arg} =~ "..." ]] || [[ i -gt 3 ]]; then
+                # Loop two times to make sure we are not only completing the first arg
+                if [[ ! ${arg} =~ "..." ]] || [[ i -gt 1 ]]; then
                     break
                 fi
 
@@ -206,16 +226,7 @@ function check_shell_completion() {
         if [[ ! ${args##* } =~ "..." ]]; then
             run_completion "$@" $cmd "${extra_args[@]}" ""
             _check_completion_end NoFileComp
-            if [ ${#lines[@]} -gt 2 ]; then
-                # checking for line count is not enough since we may include additional debug output
-                # lines starting with [Debug] are allowed
-                i=0
-                length=$(( ${#lines[@]} - 2 ))
-                while [[ i -lt length ]]; do
-                    [[ "${lines[$i]:0:7}" == "[Debug]" ]] || die "Suggestions are in the output"
-                    i=$(( i + 1 ))
-                done
-            fi
+            _check_no_suggestions
         fi
 
     done
@@ -232,17 +243,35 @@ function _check_completion_end() {
     is "${lines[-1]}" "Completion ended with directive: ShellCompDirective$1" "Completion has wrong ShellCompDirective set"
 }
 
+# Check that there are no suggestions in the output.
+# We could only check stdout and not stderr but this is not possible with bats.
+# By default we always have two extra lines at the end for the ShellCompDirective.
+# Then we could also have other extra lines for debugging, they will always start
+# with [Debug], e.g. `[Debug] [Error] no container with name or ID "t12" found: no such container`.
+function _check_no_suggestions() {
+    if [ ${#lines[@]} -gt 2 ]; then
+        # Checking for line count is not enough since we may include additional debug output.
+        # Lines starting with [Debug] are allowed.
+        local i=0
+        length=$((${#lines[@]} - 2))
+        while [[ i -lt length ]]; do
+            assert "${lines[$i]:0:7}" == "[Debug]"  "Unexpected non-Debug output line: ${lines[$i]}"
+            i=$((i + 1))
+        done
+    fi
+}
 
+
+# bats test_tags=ci:parallel
 @test "podman shell completion test" {
 
-    random_container_name=$(random_string 30)
-    random_pod_name=$(random_string 30)
-    random_image_name=$(random_string 30)
-    random_image_name=${random_image_name,,} # name must be lowercase
+    random_container_name="c-$(safename)"
+    random_pod_name="p-$(safename)"
+    random_image_name="i-$(safename)"
     random_image_tag=$(random_string 5)
-    random_network_name=$(random_string 30)
-    random_volume_name=$(random_string 30)
-    random_secret_name=$(random_string 30)
+    random_network_name="n-$(safename)"
+    random_volume_name="v-$(safename)"
+    random_secret_name="s-$(safename)"
     random_secret_content=$(random_string 30)
     secret_file=$PODMAN_TMPDIR/$(random_string 10)
 
@@ -260,10 +289,10 @@ function _check_completion_end() {
     # create pods for each state
     run_podman pod create --name created-$random_pod_name
     run_podman pod create --name running-$random_pod_name
-    run_podman run -d --name running-$random_pod_name-con --pod running-$random_pod_name $IMAGE top
     run_podman pod create --name degraded-$random_pod_name
-    run_podman run -d --name degraded-$random_pod_name-con --pod degraded-$random_pod_name $IMAGE echo degraded
     run_podman pod create --name exited-$random_pod_name
+    run_podman run -d --name running-$random_pod_name-con --pod running-$random_pod_name $IMAGE top
+    run_podman run -d --name degraded-$random_pod_name-con --pod degraded-$random_pod_name $IMAGE echo degraded
     run_podman run -d --name exited-$random_pod_name-con --pod exited-$random_pod_name $IMAGE echo exited
     run_podman pod stop exited-$random_pod_name
 
@@ -281,14 +310,33 @@ function _check_completion_end() {
     # create secret
     run_podman secret create $random_secret_name $secret_file
 
-    # $PODMAN may be a space-separated string, e.g. if we include a --url.
-    local -a podman_as_array=($PODMAN)
-    # __completeNoDesc must be the first arg if we running the completion cmd
-    PODMAN_COMPLETION="${podman_as_array[0]} __completeNoDesc ${podman_as_array[@]:1}"
+    # create our own registries.conf so we know what registry is set
+    local CONTAINERS_REGISTRIES_CONF="$PODMAN_TMPDIR/registries.conf"
+    echo 'unqualified-search-registries = ["quay.io"]' > "$CONTAINERS_REGISTRIES_CONF"
+    export CONTAINERS_REGISTRIES_CONF
 
     # Called with no args -- start with 'podman --help'. check_shell_completion() will
     # recurse for any subcommands.
     check_shell_completion
+
+    # check inspect with format flag
+    run_completion inspect -f "{{."
+    assert "$output" =~ ".*^\{\{\.Args\}\}\$.*" "Defaulting to container type is completed"
+
+    run_completion inspect created-$random_container_name -f "{{."
+    assert "$output" =~ ".*^\{\{\.Args\}\}\$.*" "Container type is completed"
+
+    run_completion inspect $random_image_name -f "{{."
+    assert "$output" =~ ".*^\{\{\.Digest\}\}\$.*" "Image type is completed"
+
+    run_completion inspect $random_volume_name -f "{{."
+    assert "$output" =~ ".*^\{\{\.Anonymous\}\}\$.*" "Volume type is completed"
+
+    run_completion inspect created-$random_pod_name -f "{{."
+    assert "$output" =~ ".*^\{\{\.BlkioDeviceReadBps\}\}\$.*" "Pod type is completed"
+
+    run_completion inspect $random_network_name -f "{{."
+    assert "$output" =~ ".*^\{\{\.DNSEnabled\}\}\$.*" "Network type is completed"
 
     # cleanup
     run_podman secret rm $random_secret_name
@@ -301,19 +349,84 @@ function _check_completion_end() {
     run_podman image untag $IMAGE $random_image_name:$random_image_tag
 
     for state in created running degraded exited; do
-        run_podman pod rm --force $state-$random_pod_name
+        run_podman pod rm -t 0 --force $state-$random_pod_name
     done
 
     for state in created running pause exited; do
         run_podman rm --force $state-$random_container_name
     done
+}
 
-    # Clean up the pod pause image
-    run_podman image list --format '{{.ID}} {{.Repository}}'
-    while read id name; do
-        if [[ "$name" =~ /pause ]]; then
-            run_podman rmi $id
-        fi
-    done <<<"$output"
+# bats test_tags=ci:parallel
+@test "podman shell completion for paths in container/image" {
+    skip_if_remote "mounting via remote does not work"
+    for cmd in create run; do
+        run_completion $cmd $IMAGE ""
+        assert "$output" =~ ".*^/etc/\$.*" "etc directory suggested (cmd: podman $cmd)"
+        assert "$output" =~ ".*^/home/\$.*" "home directory suggested (cmd: podman $cmd)"
+        assert "$output" =~ ".*^/root/\$.*" "root directory suggested (cmd: podman $cmd)"
 
+        # check completion for subdirectory
+        run_completion $cmd $IMAGE "/etc"
+        # It should be safe to assume the os-release file always exists in $IMAGE
+        assert "$output" =~ ".*^/etc/os-release\$.*" "/etc files suggested (cmd: podman $cmd /etc)"
+        # check completion for partial file name
+        run_completion $cmd $IMAGE "/etc/os-"
+        assert "$output" =~ ".*^/etc/os-release\$.*" "/etc files suggested (cmd: podman $cmd /etc/os-)"
+
+        # regression check for https://bugzilla.redhat.com/show_bug.cgi?id=2209809
+        # check for relative directory without slash in path.
+        run_completion $cmd $IMAGE "e"
+        assert "$output" =~ ".*^etc/\$.*" "etc dir suggested (cmd: podman $cmd e)"
+
+        # check completion with relative path components
+        # It is important the we will still use the image root and not escape to the host
+        run_completion $cmd $IMAGE "../../"
+        assert "$output" =~ ".*^../../etc/\$.*" "relative etc directory suggested (cmd: podman $cmd ../../)"
+        assert "$output" =~ ".*^../../home/\$.*" "relative home directory suggested (cmd: podman $cmd ../../)"
+    done
+
+    ctrname="c-$(safename)"
+    random_file=$(random_string 30)
+    run_podman run --name $ctrname $IMAGE sh -c "touch /tmp/$random_file && touch /tmp/${random_file}2 && mkdir /emptydir"
+
+    # check completion for podman cp
+    run_completion cp ""
+    assert "$output" =~ ".*^$ctrname\:\$.*" "podman cp suggest container names"
+
+    run_completion cp "$ctrname:"
+    assert "$output" =~ ".*^$ctrname\:/etc/\$.*" "podman cp suggest paths in container"
+
+    run_completion cp "$ctrname:/tmp"
+    assert "$output" =~ ".*^$ctrname\:/tmp/$random_file\$.*" "podman cp suggest custom file in container"
+
+    run_completion cp "$ctrname:/tmp/$random_file"
+    assert "$output" =~ ".*^$ctrname\:/tmp/$random_file\$.*" "podman cp suggest /tmp/$random_file file in container"
+    assert "$output" =~ ".*^$ctrname\:/tmp/${random_file}2\$.*" "podman cp suggest /tmp/${random_file}2 file in container"
+
+    run_completion cp "$ctrname:/emptydir"
+    assert "$output" =~ ".*^$ctrname\:/emptydir/\$.*ShellCompDirectiveNoSpace" "podman cp suggest empty dir with no space directive (:2)"
+
+    # cleanup container
+    run_podman rm $ctrname
+}
+
+# bats test_tags=ci:parallel
+@test "podman run --sysctl completion for sysctl" {
+    skip_if_remote "sysctl option not working via remote"
+
+    run_completion run --sysctl net.
+
+    assert "$output" =~ "^net\." \
+      "Only suggestions with 'net.' should be present for podman run --sysctl net."
+
+    _check_completion_end NoFileComp
+}
+
+@test "podman network create --interface-name" {
+    run_completion network create --interface-name l
+
+    assert "$output" =~ '.*lo.*' "Loopback interface should be present by default"
+
+    _check_completion_end NoFileComp
 }

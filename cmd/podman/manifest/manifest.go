@@ -1,8 +1,8 @@
 package manifest
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +16,7 @@ var (
 		Example: `podman manifest add mylist:v1.11 image:v1.11-amd64
   podman manifest create localhost/list
   podman manifest inspect localhost/list
-  podman manifest annotate --annotation left=right mylist:v1.11 image:v1.11-amd64
+  podman manifest annotate --annotation left=right mylist:v1.11 sha256:15352d97781ffdf357bf3459c037be3efac4133dc9070c2dce7eca7c05c3e736
   podman manifest push mylist:v1.11 docker://quay.io/myuser/image:v1.11
   podman manifest remove mylist:v1.11 sha256:15352d97781ffdf357bf3459c037be3efac4133dc9070c2dce7eca7c05c3e736
   podman manifest rm mylist:v1.11`,

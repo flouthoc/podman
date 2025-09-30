@@ -3,26 +3,25 @@ package containers
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"reflect"
 	"strconv"
 	"time"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/bindings"
-	sig "github.com/containers/podman/v3/pkg/signal"
-	"github.com/containers/podman/v3/utils"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/moby/term"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/ssh/terminal"
+	"go.podman.io/common/pkg/detach"
+	terminal "golang.org/x/term"
 )
 
 // The CloseWriter interface is used to determine whether we can do a  one-sided
@@ -31,7 +30,13 @@ type CloseWriter interface {
 	CloseWrite() error
 }
 
-// Attach attaches to a running container
+// Attach attaches to a running container.
+//
+// NOTE: When stdin is provided, this function currently leaks a goroutine reading from that stream
+// even if the ctx is cancelled. The goroutine will only exit if the input stream is closed. For example,
+// if stdin is `os.Stdin` attached to a tty, the goroutine will consume a chunk of user input from the
+// terminal even after the container has exited. In this scenario the os.Stdin stream will not be expected
+// to be closed.
 func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Writer, stderr io.Writer, attachReady chan bool, options *AttachOptions) error {
 	if options == nil {
 		options = new(AttachOptions)
@@ -41,9 +46,9 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 		stdout bool
 		stderr bool
 	}{
-		stdin:  !(stdin == nil || reflect.ValueOf(stdin).IsNil()),
-		stdout: !(stdout == nil || reflect.ValueOf(stdout).IsNil()),
-		stderr: !(stderr == nil || reflect.ValueOf(stderr).IsNil()),
+		stdin:  stdin != nil && !reflect.ValueOf(stdin).IsNil(),
+		stdout: stdout != nil && !reflect.ValueOf(stdout).IsNil(),
+		stderr: stderr != nil && !reflect.ValueOf(stderr).IsNil(),
 	}
 	// Ensure golang can determine that interfaces are "really" nil
 	if !isSet.stdin {
@@ -55,8 +60,6 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 	if !isSet.stderr {
 		stderr = (io.Writer)(nil)
 	}
-
-	logrus.Infof("Going to attach to container %q", nameOrID)
 
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
@@ -79,7 +82,7 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 
 		detachKeysInBytes, err = term.ToBytes(options.GetDetachKeys())
 		if err != nil {
-			return errors.Wrapf(err, "invalid detach keys")
+			return fmt.Errorf("invalid detach keys: %w", err)
 		}
 	}
 	if isSet.stdin {
@@ -94,7 +97,8 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 
 	// Unless all requirements are met, don't use "stdin" is a terminal
 	file, ok := stdin.(*os.File)
-	needTTY := ok && terminal.IsTerminal(int(file.Fd())) && ctnr.Config.Tty
+	outFile, outOk := stdout.(*os.File)
+	needTTY := ok && outOk && terminal.IsTerminal(int(file.Fd())) && ctnr.Config.Tty
 	if needTTY {
 		state, err := setRawTerminal(file)
 		if err != nil {
@@ -102,49 +106,24 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 		}
 		defer func() {
 			if err := terminal.Restore(int(file.Fd()), state); err != nil {
-				logrus.Errorf("unable to restore terminal: %q", err)
+				logrus.Errorf("Unable to restore terminal: %q", err)
 			}
 			logrus.SetFormatter(&logrus.TextFormatter{})
 		}()
 	}
 
-	headers := make(map[string]string)
-	headers["Connection"] = "Upgrade"
-	headers["Upgrade"] = "tcp"
-
-	var socket net.Conn
-	socketSet := false
-	dialContext := conn.Client.Transport.(*http.Transport).DialContext
-	t := &http.Transport{
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			c, err := dialContext(ctx, network, address)
-			if err != nil {
-				return nil, err
-			}
-			if !socketSet {
-				socket = c
-				socketSet = true
-			}
-			return c, err
-		},
-		IdleConnTimeout: time.Duration(0),
-	}
-	conn.Client.Transport = t
-	response, err := conn.DoRequest(nil, http.MethodPost, "/containers/%s/attach", params, headers, nameOrID)
+	cw, socket, err := newUpgradeRequest(ctx, conn, nil, fmt.Sprintf("/containers/%s/attach", nameOrID), params)
 	if err != nil {
 		return err
 	}
-	if !(response.IsSuccess() || response.IsInformational()) {
-		return response.Process(nil)
-	}
+	defer socket.Close()
 
 	if needTTY {
 		winChange := make(chan os.Signal, 1)
-		signal.Notify(winChange, sig.SIGWINCH)
 		winCtx, winCancel := context.WithCancel(ctx)
 		defer winCancel()
-
-		attachHandleResize(ctx, winCtx, winChange, false, nameOrID, file)
+		notifyWinChange(winCtx, winChange, file, outFile)
+		attachHandleResize(ctx, winCtx, winChange, false, nameOrID, file, outFile)
 	}
 
 	// If we are attaching around a start, we need to "signal"
@@ -155,24 +134,23 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 	}
 
 	stdoutChan := make(chan error)
-	stdinChan := make(chan error)
+	stdinChan := make(chan error, 1) // stdin channel should not block
 
 	if isSet.stdin {
 		go func() {
 			logrus.Debugf("Copying STDIN to socket")
 
-			_, err := utils.CopyDetachable(socket, stdin, detachKeysInBytes)
-
-			if err != nil && err != define.ErrDetach {
-				logrus.Error("failed to write input to service: " + err.Error())
+			_, err := detach.Copy(socket, stdin, detachKeysInBytes)
+			// Ignore "closed network connection" as it occurs when the container ends, which is expected.
+			// This avoids noisy logs but does not fix the goroutine leak
+			// https://github.com/containers/podman/issues/25344
+			if err != nil && err != define.ErrDetach && !errors.Is(err, net.ErrClosed) {
+				logrus.Errorf("Failed to write input to service: %v", err)
+			}
+			if err == nil {
+				cw.CloseWrite()
 			}
 			stdinChan <- err
-
-			if closeWrite, ok := socket.(CloseWriter); ok {
-				if err := closeWrite.CloseWrite(); err != nil {
-					logrus.Warnf("Failed to close STDIN for writing: %v", err)
-				}
-			}
 		}()
 	}
 
@@ -203,11 +181,11 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 					return err
 				}
 
-				return nil
+				return <-stdoutChan
 			}
 		}
 	} else {
-		logrus.Debugf("Copying standard streams of container in non-terminal mode")
+		logrus.Debugf("Copying standard streams of container %q in non-terminal mode", ctnr.ID)
 		for {
 			// Read multiplexed channels and write to appropriate stream
 			fd, l, err := DemuxHeader(socket, buffer)
@@ -222,27 +200,27 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 				return err
 			}
 
-			switch {
-			case fd == 0:
+			switch fd {
+			case 0:
 				if isSet.stdout {
-					if _, err := stdout.Write(frame[0:l]); err != nil {
+					if _, err := stdout.Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 1:
+			case 1:
 				if isSet.stdout {
-					if _, err := stdout.Write(frame[0:l]); err != nil {
+					if _, err := stdout.Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 2:
+			case 2:
 				if isSet.stderr {
-					if _, err := stderr.Write(frame[0:l]); err != nil {
+					if _, err := stderr.Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 3:
-				return fmt.Errorf("error from service from stream: %s", frame)
+			case 3:
+				return fmt.Errorf("from service from stream: %s", frame)
 			default:
 				return fmt.Errorf("unrecognized channel '%d' in header, 0-3 supported", fd)
 			}
@@ -252,18 +230,14 @@ func Attach(ctx context.Context, nameOrID string, stdin io.Reader, stdout io.Wri
 
 // DemuxHeader reads header for stream from server multiplexed stdin/stdout/stderr/2nd error channel
 func DemuxHeader(r io.Reader, buffer []byte) (fd, sz int, err error) {
-	n, err := io.ReadFull(r, buffer[0:8])
+	_, err = io.ReadFull(r, buffer[0:8])
 	if err != nil {
-		return
-	}
-	if n < 8 {
-		err = io.ErrUnexpectedEOF
 		return
 	}
 
 	fd = int(buffer[0])
 	if fd < 0 || fd > 3 {
-		err = errors.Wrapf(ErrLostSync, fmt.Sprintf(`channel "%d" found, 0-3 supported`, fd))
+		err = fmt.Errorf(`channel "%d" found, 0-3 supported: %w`, fd, ErrLostSync)
 		return
 	}
 
@@ -277,13 +251,9 @@ func DemuxFrame(r io.Reader, buffer []byte, length int) (frame []byte, err error
 		buffer = append(buffer, make([]byte, length-len(buffer)+1)...)
 	}
 
-	n, err := io.ReadFull(r, buffer[0:length])
+	_, err = io.ReadFull(r, buffer[0:length])
 	if err != nil {
-		return nil, nil
-	}
-	if n < length {
-		err = io.ErrUnexpectedEOF
-		return
+		return nil, err
 	}
 
 	return buffer[0:length], nil
@@ -298,11 +268,11 @@ func ResizeContainerTTY(ctx context.Context, nameOrID string, options *ResizeTTY
 }
 
 // ResizeExecTTY sets session's TTY height and width in characters
-func ResizeExecTTY(ctx context.Context, nameOrID string, options *ResizeExecTTYOptions) error {
+func ResizeExecTTY(ctx context.Context, sessionID string, options *ResizeExecTTYOptions) error {
 	if options == nil {
 		options = new(ResizeExecTTYOptions)
 	}
-	return resizeTTY(ctx, bindings.JoinURL("exec", nameOrID, "resize"), options.Height, options.Width)
+	return resizeTTY(ctx, bindings.JoinURL("exec", sessionID, "resize"), options.Height, options.Width)
 }
 
 // resizeTTY set size of TTY of container
@@ -320,10 +290,12 @@ func resizeTTY(ctx context.Context, endpoint string, height *int, width *int) er
 		params.Set("w", strconv.Itoa(*width))
 	}
 	params.Set("running", "true")
-	rsp, err := conn.DoRequest(nil, http.MethodPost, endpoint, params, nil)
+	rsp, err := conn.DoRequest(ctx, nil, http.MethodPost, endpoint, params, nil)
 	if err != nil {
 		return err
 	}
+	defer rsp.Body.Close()
+
 	return rsp.Process(nil)
 }
 
@@ -341,11 +313,11 @@ func (f *rawFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 
 // This is intended to not be run as a goroutine, handling resizing for a container
 // or exec session. It will call resize once and then starts a goroutine which calls resize on winChange
-func attachHandleResize(ctx, winCtx context.Context, winChange chan os.Signal, isExec bool, id string, file *os.File) {
+func attachHandleResize(ctx, winCtx context.Context, winChange chan os.Signal, isExec bool, id string, file *os.File, outFile *os.File) {
 	resize := func() {
-		w, h, err := terminal.GetSize(int(file.Fd()))
+		w, h, err := getTermSize(file, outFile)
 		if err != nil {
-			logrus.Warnf("failed to obtain TTY size: %v", err)
+			logrus.Warnf("Failed to obtain TTY size: %v", err)
 		}
 
 		var resizeErr error
@@ -355,7 +327,7 @@ func attachHandleResize(ctx, winCtx context.Context, winChange chan os.Signal, i
 			resizeErr = ResizeContainerTTY(ctx, id, new(ResizeTTYOptions).WithHeight(h).WithWidth(w))
 		}
 		if resizeErr != nil {
-			logrus.Infof("failed to resize TTY: %v", resizeErr)
+			logrus.Debugf("Failed to resize TTY: %v", resizeErr)
 		}
 	}
 
@@ -375,7 +347,7 @@ func attachHandleResize(ctx, winCtx context.Context, winChange chan os.Signal, i
 
 // Configure the given terminal for raw mode
 func setRawTerminal(file *os.File) (*terminal.State, error) {
-	state, err := terminal.MakeRaw(int(file.Fd()))
+	state, err := makeRawTerm(file)
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +358,12 @@ func setRawTerminal(file *os.File) (*terminal.State, error) {
 }
 
 // ExecStartAndAttach starts and attaches to a given exec session.
+//
+// NOTE: When options.GetAttachInput() is true, this function currently leaks a goroutine reading from that stream
+// even if the ctx is cancelled. The goroutine will only exit if the input stream is closed. For example,
+// if stdin is `os.Stdin` attached to a tty, the goroutine will consume a chunk of user input from the
+// terminal even after the exec session has exited. In this scenario the os.Stdin stream will not be expected
+// to be closed.
 func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStartAndAttachOptions) error {
 	if options == nil {
 		options = new(ExecStartAndAttachOptions)
@@ -398,15 +376,17 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 	// TODO: Make this configurable (can't use streams' InputStream as it's
 	// buffered)
 	terminalFile := os.Stdin
+	terminalOutFile := os.Stdout
 
 	logrus.Debugf("Starting & Attaching to exec session ID %q", sessionID)
 
 	// We need to inspect the exec session first to determine whether to use
 	// -t.
-	resp, err := conn.DoRequest(nil, http.MethodGet, "/exec/%s/json", nil, nil, sessionID)
+	resp, err := conn.DoRequest(ctx, nil, http.MethodGet, "/exec/%s/json", nil, nil, sessionID)
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
 
 	respStruct := new(define.InspectExecSession)
 	if err := resp.Process(respStruct); err != nil {
@@ -438,13 +418,13 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 		}
 		defer func() {
 			if err := terminal.Restore(int(terminalFile.Fd()), state); err != nil {
-				logrus.Errorf("unable to restore terminal: %q", err)
+				logrus.Errorf("Unable to restore terminal: %q", err)
 			}
 			logrus.SetFormatter(&logrus.TextFormatter{})
 		}()
-		w, h, err := terminal.GetSize(int(terminalFile.Fd()))
+		w, h, err := getTermSize(terminalFile, terminalOutFile)
 		if err != nil {
-			logrus.Warnf("failed to obtain TTY size: %v", err)
+			logrus.Warnf("Failed to obtain TTY size: %v", err)
 		}
 		body.Width = uint16(w)
 		body.Height = uint16(h)
@@ -455,54 +435,34 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 		return err
 	}
 
-	var socket net.Conn
-	socketSet := false
-	dialContext := conn.Client.Transport.(*http.Transport).DialContext
-	t := &http.Transport{
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			c, err := dialContext(ctx, network, address)
-			if err != nil {
-				return nil, err
-			}
-			if !socketSet {
-				socket = c
-				socketSet = true
-			}
-			return c, err
-		},
-		IdleConnTimeout: time.Duration(0),
-	}
-	conn.Client.Transport = t
-	response, err := conn.DoRequest(bytes.NewReader(bodyJSON), http.MethodPost, "/exec/%s/start", nil, nil, sessionID)
+	cw, socket, err := newUpgradeRequest(ctx, conn, bytes.NewReader(bodyJSON), fmt.Sprintf("/exec/%s/start", sessionID), nil)
 	if err != nil {
 		return err
 	}
-	if !(response.IsSuccess() || response.IsInformational()) {
-		return response.Process(nil)
-	}
+	defer socket.Close()
 
 	if needTTY {
 		winChange := make(chan os.Signal, 1)
-		signal.Notify(winChange, sig.SIGWINCH)
 		winCtx, winCancel := context.WithCancel(ctx)
 		defer winCancel()
 
-		attachHandleResize(ctx, winCtx, winChange, true, sessionID, terminalFile)
+		notifyWinChange(winCtx, winChange, terminalFile, terminalOutFile)
+		attachHandleResize(ctx, winCtx, winChange, true, sessionID, terminalFile, terminalOutFile)
 	}
 
 	if options.GetAttachInput() {
 		go func() {
 			logrus.Debugf("Copying STDIN to socket")
-			_, err := utils.CopyDetachable(socket, options.InputStream, []byte{})
-			if err != nil {
-				logrus.Error("failed to write input to service: " + err.Error())
+			_, err := detach.Copy(socket, options.InputStream, []byte{})
+			// Ignore "closed network connection" as it occurs when the exec ends, which is expected.
+			// This avoids noisy logs but does not fix the goroutine leak
+			// https://github.com/containers/podman/issues/25344
+			if err != nil && !errors.Is(err, net.ErrClosed) {
+				logrus.Errorf("Failed to write input to service: %v", err)
 			}
 
-			if closeWrite, ok := socket.(CloseWriter); ok {
-				logrus.Debugf("Closing STDIN")
-				if err := closeWrite.CloseWrite(); err != nil {
-					logrus.Warnf("Failed to close STDIN for writing: %v", err)
-				}
+			if err == nil {
+				cw.CloseWrite()
 			}
 		}()
 	}
@@ -514,7 +474,7 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 			return fmt.Errorf("exec session %s has a terminal and must have STDOUT enabled", sessionID)
 		}
 		// If not multiplex'ed, read from server and write to stdout
-		_, err := utils.CopyDetachable(options.GetOutputStream(), socket, []byte{})
+		_, err := detach.Copy(options.GetOutputStream(), socket, []byte{})
 		if err != nil {
 			return err
 		}
@@ -534,33 +494,124 @@ func ExecStartAndAttach(ctx context.Context, sessionID string, options *ExecStar
 				return err
 			}
 
-			switch {
-			case fd == 0:
+			switch fd {
+			case 0:
 				if options.GetAttachInput() {
 					// Write STDIN to STDOUT (echoing characters
 					// typed by another attach session)
-					if _, err := options.GetOutputStream().Write(frame[0:l]); err != nil {
+					if _, err := options.GetOutputStream().Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 1:
+			case 1:
 				if options.GetAttachOutput() {
-					if _, err := options.GetOutputStream().Write(frame[0:l]); err != nil {
+					if _, err := options.GetOutputStream().Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 2:
+			case 2:
 				if options.GetAttachError() {
-					if _, err := options.GetErrorStream().Write(frame[0:l]); err != nil {
+					if _, err := options.GetErrorStream().Write(frame); err != nil {
 						return err
 					}
 				}
-			case fd == 3:
-				return fmt.Errorf("error from service from stream: %s", frame)
+			case 3:
+				return fmt.Errorf("from service from stream: %s", frame)
 			default:
 				return fmt.Errorf("unrecognized channel '%d' in header, 0-3 supported", fd)
 			}
 		}
 	}
 	return nil
+}
+
+type closeWrite struct {
+	// sock is the underlying socket of the connection.
+	// Do not use that field directly.
+	sock net.Conn
+}
+
+func (cw *closeWrite) CloseWrite() {
+	if closeWrite, ok := cw.sock.(CloseWriter); ok {
+		logrus.Debugf("Closing STDIN")
+		if err := closeWrite.CloseWrite(); err != nil {
+			logrus.Warnf("Failed to close STDIN for writing: %v", err)
+		}
+	}
+}
+
+// newUpgradeRequest performs a new http Upgrade request, it return the closeWrite which should be used
+// to close the STDIN side used and the ReadWriter which MUST be uses to write/read from the connection
+// and which must closed when finished. Do not access the new.Conn in closeWrite directly.
+func newUpgradeRequest(ctx context.Context, conn *bindings.Connection, body io.Reader, path string, params url.Values) (*closeWrite, io.ReadWriteCloser, error) {
+	headers := http.Header{
+		"Connection": []string{"Upgrade"},
+		"Upgrade":    []string{"tcp"},
+	}
+
+	// FIXME: This is one giant race condition. Let's hope no-one uses this same client until we're done!
+	var socket net.Conn
+	socketSet := false
+	dialContext := conn.Client.Transport.(*http.Transport).DialContext
+	tlsConfig := conn.Client.Transport.(*http.Transport).TLSClientConfig
+	t := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			c, err := dialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			if !socketSet {
+				socket = c
+				socketSet = true
+			}
+			return c, err
+		},
+		DialTLSContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			c, err := dialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			var cfg *tls.Config
+			if tlsConfig == nil {
+				cfg = new(tls.Config)
+			} else {
+				cfg = tlsConfig.Clone()
+			}
+			if cfg.ServerName == "" {
+				var firstTLSHost string
+				if firstTLSHost, _, err = net.SplitHostPort(address); err != nil {
+					return nil, err
+				}
+				cfg.ServerName = firstTLSHost
+			}
+			c = tls.Client(c, cfg)
+			if !socketSet {
+				socket = c
+				socketSet = true
+			}
+			return c, err
+		},
+		IdleConnTimeout: time.Duration(0),
+		TLSClientConfig: tlsConfig,
+	}
+	conn.Client.Transport = t
+	response, err := conn.DoRequest(ctx, body, http.MethodPost, path, params, headers)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		defer response.Body.Close()
+		if err := response.Process(nil); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, fmt.Errorf("incorrect server response code %d, expected %d", response.StatusCode, http.StatusSwitchingProtocols)
+	}
+	rw, ok := response.Body.(io.ReadWriteCloser)
+	if !ok {
+		response.Body.Close()
+		return nil, nil, errors.New("internal error: cannot cast to http response Body to io.ReadWriteCloser")
+	}
+
+	return &closeWrite{sock: socket}, rw, nil
 }

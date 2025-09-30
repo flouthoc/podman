@@ -3,51 +3,60 @@ package entities
 import (
 	"net"
 
-	buildahDefine "github.com/containers/buildah/define"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/libpod/events"
-	"github.com/containers/podman/v3/pkg/specgen"
-	"github.com/containers/storage/pkg/archive"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/libpod/events"
+	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
+	"github.com/containers/podman/v5/pkg/specgen"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/storage/pkg/archive"
 )
 
-type Container struct {
-	IDOrNamed
-}
-
-type Volume struct {
-	Identifier
-}
-
 type Report struct {
-	Id  []string //nolint
+	Id  []string
 	Err map[string]error
 }
 
 type PodDeleteReport struct{ Report }
 
-type VolumeDeleteOptions struct{}
-type VolumeDeleteReport struct{ Report }
+type (
+	VolumeDeleteOptions struct{}
+	VolumeDeleteReport  struct{ Report }
+)
+
+type NetFlags struct {
+	AddHosts     []string `json:"add-host,omitempty"`
+	DNS          []string `json:"dns,omitempty"`
+	DNSOpt       []string `json:"dns-opt,omitempty"`
+	DNDSearch    []string `json:"dns-search,omitempty"`
+	MacAddr      string   `json:"mac-address,omitempty"`
+	Publish      []string `json:"publish,omitempty"`
+	IP           string   `json:"ip,omitempty"`
+	NoHostname   bool     `json:"no-hostname,omitempty"`
+	NoHosts      bool     `json:"no-hosts,omitempty"`
+	Network      string   `json:"network,omitempty"`
+	NetworkAlias []string `json:"network-alias,omitempty"`
+}
 
 // NetOptions reflect the shared network options between
 // pods and containers
 type NetOptions struct {
-	AddHosts           []string
-	Aliases            []string
-	CNINetworks        []string
-	UseImageResolvConf bool
-	DNSOptions         []string
-	DNSSearch          []string
-	DNSServers         []net.IP
-	Network            specgen.Namespace
-	NoHosts            bool
-	PublishPorts       []specgen.PortMapping
-	StaticIP           *net.IP
-	StaticMAC          *net.HardwareAddr
+	AddHosts           []string                           `json:"hostadd,omitempty"`
+	Aliases            []string                           `json:"network_alias,omitempty"`
+	Networks           map[string]types.PerNetworkOptions `json:"networks,omitempty"`
+	UseImageResolvConf bool                               `json:"no_manage_resolv_conf,omitempty"`
+	DNSOptions         []string                           `json:"dns_option,omitempty"`
+	DNSSearch          []string                           `json:"dns_search,omitempty"`
+	DNSServers         []net.IP                           `json:"dns_server,omitempty"`
+	HostsFile          string                             `json:"hosts_file,omitempty"`
+	Network            specgen.Namespace                  `json:"netns"`
+	NoHostname         bool                               `json:"no_manage_hostname,omitempty"`
+	NoHosts            bool                               `json:"no_manage_hosts,omitempty"`
+	PublishPorts       []types.PortMapping                `json:"portmappings,omitempty"`
 	// NetworkOptions are additional options for each network
-	NetworkOptions map[string][]string
+	NetworkOptions map[string][]string `json:"network_options,omitempty"`
 }
 
-// All CLI inspect commands and inspect sub-commands use the same options
+// InspectOptions all CLI inspect commands and inspect sub-commands use the same options
 type InspectOptions struct {
 	// Format - change the output to JSON or a Go template.
 	Format string `json:",omitempty"`
@@ -61,12 +70,11 @@ type InspectOptions struct {
 	All bool `json:",omitempty"`
 }
 
-// All API and CLI diff commands and diff sub-commands use the same options
+// DiffOptions all API and CLI diff commands and diff sub-commands use the same options
 type DiffOptions struct {
-	Format  string          `json:",omitempty"` // CLI only
-	Latest  bool            `json:",omitempty"` // API and CLI, only supported by containers
-	Archive bool            `json:",omitempty"` // CLI only
-	Type    define.DiffType // Type which should be compared
+	Format string          `json:",omitempty"` // CLI only
+	Latest bool            `json:",omitempty"` // API and CLI, only supported by containers
+	Type   define.DiffType // Type which should be compared
 }
 
 // DiffReport provides changes for object
@@ -76,7 +84,7 @@ type DiffReport struct {
 
 type EventsOptions struct {
 	FromStart bool
-	EventChan chan *events.Event
+	EventChan chan events.ReadResult
 	Filter    []string
 	Stream    bool
 	Since     string
@@ -84,20 +92,20 @@ type EventsOptions struct {
 }
 
 // ContainerCreateResponse is the response struct for creating a container
-type ContainerCreateResponse struct {
-	// ID of the container created
-	ID string `json:"Id"`
-	// Warnings during container creation
-	Warnings []string `json:"Warnings"`
-}
+type ContainerCreateResponse = entitiesTypes.ContainerCreateResponse
 
 // BuildOptions describe the options for building container images.
-type BuildOptions struct {
-	buildahDefine.BuildOptions
-}
+type BuildOptions = entitiesTypes.BuildOptions
 
 // BuildReport is the image-build report.
-type BuildReport struct {
-	// ID of the image.
-	ID string
+type BuildReport = entitiesTypes.BuildReport
+
+// FarmBuildOptions describes the options for building container images on farm nodes
+type FarmBuildOptions = entitiesTypes.FarmBuildOptions
+
+type IDOrNameResponse struct {
+	// The Id or Name of an object
+	IDOrName string
 }
+
+type IDResponse = entitiesTypes.IDResponse

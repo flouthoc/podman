@@ -1,22 +1,23 @@
 package images
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/image/v5/docker/reference"
 )
 
 type listFlagType struct {
@@ -61,13 +62,6 @@ var (
 
 	// Options for presenting data
 	listFlag = listFlagType{}
-
-	sortFields = entities.NewStringSet(
-		"created",
-		"id",
-		"repository",
-		"size",
-		"tag")
 )
 
 func init() {
@@ -89,21 +83,30 @@ func imageListFlagSet(cmd *cobra.Command) {
 	flags.BoolVarP(&listOptions.All, "all", "a", false, "Show all images (default hides intermediate images)")
 
 	filterFlagName := "filter"
-	flags.StringSliceVarP(&listOptions.Filter, filterFlagName, "f", []string{}, "Filter output based on conditions provided (default [])")
+	flags.StringArrayVarP(&listOptions.Filter, filterFlagName, "f", []string{}, "Filter output based on conditions provided (default [])")
 	_ = cmd.RegisterFlagCompletionFunc(filterFlagName, common.AutocompleteImageFilters)
 
 	formatFlagName := "format"
 	flags.StringVar(&listFlag.format, formatFlagName, "", "Change the output format to JSON or a Go template")
-	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(entities.ImageSummary{}))
+	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&imageReporter{}))
 
 	flags.BoolVar(&listFlag.digests, "digests", false, "Show digests")
 	flags.BoolVarP(&listFlag.noHeading, "noheading", "n", false, "Do not print column headings")
 	flags.BoolVar(&listFlag.noTrunc, "no-trunc", false, "Do not truncate output")
 	flags.BoolVarP(&listFlag.quiet, "quiet", "q", false, "Display only image IDs")
 
+	// set default sort value
+	listFlag.sort = "created"
+	sort := validate.Value(&listFlag.sort,
+		"created",
+		"id",
+		"repository",
+		"size",
+		"tag",
+	)
 	sortFlagName := "sort"
-	flags.StringVar(&listFlag.sort, sortFlagName, "created", "Sort by "+sortFields.String())
-	_ = cmd.RegisterFlagCompletionFunc(sortFlagName, completion.AutocompleteNone)
+	flags.Var(sort, sortFlagName, "Sort by "+sort.Choices())
+	_ = cmd.RegisterFlagCompletionFunc(sortFlagName, common.AutocompleteImageSort)
 
 	flags.BoolVarP(&listFlag.history, "history", "", false, "Display the image name history")
 }
@@ -117,12 +120,7 @@ func images(cmd *cobra.Command, args []string) error {
 		listOptions.Filter = append(listOptions.Filter, "reference="+args[0])
 	}
 
-	if cmd.Flag("sort").Changed && !sortFields.Contains(listFlag.sort) {
-		return fmt.Errorf("\"%s\" is not a valid field for sorting. Choose from: %s",
-			listFlag.sort, sortFields.String())
-	}
-
-	summaries, err := registry.ImageEngine().List(registry.GetContext(), listOptions)
+	summaries, err := registry.ImageEngine().List(registry.Context(), listOptions)
 	if err != nil {
 		return err
 	}
@@ -140,7 +138,7 @@ func images(cmd *cobra.Command, args []string) error {
 		if cmd.Flags().Changed("format") && !report.HasTable(listFlag.format) {
 			listFlag.noHeading = true
 		}
-		return writeTemplate(imgs)
+		return writeTemplate(cmd, imgs)
 	}
 }
 
@@ -186,38 +184,31 @@ func writeJSON(images []imageReporter) error {
 	return nil
 }
 
-func writeTemplate(imgs []imageReporter) error {
+func writeTemplate(cmd *cobra.Command, imgs []imageReporter) error {
 	hdrs := report.Headers(imageReporter{}, map[string]string{
 		"ID":       "IMAGE ID",
 		"ReadOnly": "R/O",
 	})
 
-	var format string
-	if listFlag.format == "" {
-		format = lsFormatFromFlags(listFlag)
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+
+	var err error
+	if cmd.Flags().Changed("format") {
+		rpt, err = rpt.Parse(report.OriginUser, cmd.Flag("format").Value.String())
 	} else {
-		format = report.NormalizeFormat(listFlag.format)
-		format = report.EnforceRange(format)
+		rpt, err = rpt.Parse(report.OriginPodman, lsFormatFromFlags(listFlag))
 	}
-
-	tmpl, err := report.NewTemplate("list").Parse(format)
 	if err != nil {
 		return err
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
-	if !listFlag.noHeading {
-		if err := tmpl.Execute(w, hdrs); err != nil {
+	if rpt.RenderHeaders && !listFlag.noHeading {
+		if err := rpt.Execute(hdrs); err != nil {
 			return err
 		}
 	}
-
-	return tmpl.Execute(w, imgs)
+	return rpt.Execute(imgs)
 }
 
 func sortImages(imageS []*entities.ImageSummary) ([]imageReporter, error) {
@@ -232,7 +223,7 @@ func sortImages(imageS []*entities.ImageSummary) ([]imageReporter, error) {
 				h.ImageSummary = *e
 				h.Repository, h.Tag, err = tokenRepoTag(tag)
 				if err != nil {
-					return nil, errors.Wrapf(err, "error parsing repository tag %q:", tag)
+					return nil, fmt.Errorf("parsing repository tag: %q: %w", tag, err)
 				}
 				if h.Tag == "<none>" {
 					untagged = append(untagged, h)
@@ -256,7 +247,35 @@ func sortImages(imageS []*entities.ImageSummary) ([]imageReporter, error) {
 		listFlag.readOnly = e.IsReadOnly()
 	}
 
-	sort.Slice(imgs, sortFunc(listFlag.sort, imgs))
+	slices.SortFunc(imgs, func(a, b imageReporter) int {
+		switch listFlag.sort {
+		case "id":
+			return cmp.Compare(a.ID(), b.ID())
+
+		case "repository":
+			r := cmp.Compare(a.Repository, b.Repository)
+			if r == 0 {
+				// if repository is the same imply tag sorting
+				return cmp.Compare(a.Tag, b.Tag)
+			}
+			return r
+		case "size":
+			return cmp.Compare(a.size(), b.size())
+		case "tag":
+			return cmp.Compare(a.Tag, b.Tag)
+		case "created":
+			if a.created().After(b.created()) {
+				return -1
+			}
+			if a.created().Equal(b.created()) {
+				return 0
+			}
+			return 1
+		default:
+			return 0
+		}
+	})
+
 	return imgs, err
 }
 
@@ -289,32 +308,6 @@ func tokenRepoTag(ref string) (string, string, error) {
 	}
 
 	return name, tag, nil
-}
-
-func sortFunc(key string, data []imageReporter) func(i, j int) bool {
-	switch key {
-	case "id":
-		return func(i, j int) bool {
-			return data[i].ID() < data[j].ID()
-		}
-	case "repository":
-		return func(i, j int) bool {
-			return data[i].Repository < data[j].Repository
-		}
-	case "size":
-		return func(i, j int) bool {
-			return data[i].size() < data[j].size()
-		}
-	case "tag":
-		return func(i, j int) bool {
-			return data[i].Tag < data[j].Tag
-		}
-	default:
-		// case "created":
-		return func(i, j int) bool {
-			return data[i].created().After(data[j].created())
-		}
-	}
 }
 
 func lsFormatFromFlags(flags listFlagType) string {

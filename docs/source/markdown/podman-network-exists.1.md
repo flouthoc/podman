@@ -1,4 +1,4 @@
-% podman-network-exists(1)
+% podman-network-exists 1
 
 ## NAME
 podman\-network\-exists - Check if the given network exists
@@ -8,8 +8,8 @@ podman\-network\-exists - Check if the given network exists
 
 ## DESCRIPTION
 **podman network exists** checks if a network exists. The **Name** or **ID**
-of the network may be used as input.  Podman will return an exit code
-of `0` when the network is found.  A `1` will be returned otherwise. An exit code of
+of the network may be used as input.  Podman returns an exit code
+of `0` when the network is found.  A `1` is returned otherwise. An exit code of
 `125` indicates there was another issue.
 
 
@@ -21,24 +21,22 @@ Print usage statement
 
 ## EXAMPLE
 
-Check if a network called `net1` exists (the network does actually exist).
+Check if specified network exists (the network does actually exist):
 ```
 $ podman network exists net1
 $ echo $?
 0
-$
 ```
 
-Check if an network called `webbackend` exists (the network does not actually exist).
+Check if nonexistent network exists:
 ```
 $ podman network exists webbackend
 $ echo $?
 1
-$
 ```
 
 ## SEE ALSO
-podman(1), podman-network-create(1), podman-network-rm(1)
+**[podman(1)](podman.1.md)**, **[podman-network(1)](podman-network.1.md)**
 
 ## HISTORY
 January 2021, Originally compiled by Paul Holzinger `<paul.holzinger@web.de>`

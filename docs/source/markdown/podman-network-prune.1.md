@@ -1,4 +1,4 @@
-% podman-network-prune(1)
+% podman-network-prune 1
 
 ## NAME
 podman\-network\-prune - Remove all unused networks
@@ -8,38 +8,46 @@ podman\-network\-prune - Remove all unused networks
 
 ## DESCRIPTION
 Remove all unused networks.  An unused network is defined by a network which
-has no containers connected or configured to connect to it. It will not remove
+has no containers connected or configured to connect to it. It does not remove
 the so-called default network which goes by the name of *podman*.
 
 ## OPTIONS
+
+#### **--filter**
+
+Provide filter values.
+
+The *filters* argument format is of `key=value`. If there is more than one *filter*, then pass multiple OPTIONS: **--filter** *foo=bar* **--filter** *bif=baz*.
+
+Supported filters:
+
+| Filter | Description                                                                                        |
+|:------:|----------------------------------------------------------------------------------------------------|
+| label  | Only remove networks, with (or without, in the case of label!=[...] is used) the specified labels. |
+| until  | Only remove networks created before given timestamp.                                               |
+
+The `label` *filter* accepts two formats. One is the `label`=*key* or `label`=*key*=*value*, which removes networks with the specified labels. The other format is the `label!`=*key* or `label!`=*key*=*value*, which removes networks without the specified labels.
+
+The `until` *filter* can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. 10m, 1h30m) computed relative to the machine’s time.
+
 #### **--force**, **-f**
 
 Do not prompt for confirmation
 
-#### **--filter**
-
-Filter output based on conditions given.
-Multiple filters can be given with multiple uses of the --filter option.
-Filters with the same key work inclusive with the only exception being
-`label` which is exclusive. Filters with different keys always work exclusive.
-
-Valid filters are listed below:
-
-| **Filter** | **Description**                                                                       |
-| ---------- | ------------------------------------------------------------------------------------- |
-| label      | [Key] or [Key=Value] Label assigned to a network                                      |
-| until      | only remove networks created before given timestamp                                   |
-
 ## EXAMPLE
-Prune networks
 
+Prune networks:
 ```
 podman network prune
 ```
 
+Prune all networks created not created in the last two hours:
+```
+podman network prune --filter until=2h
+```
 
 ## SEE ALSO
-podman(1), podman-network(1), podman-network-remove(1)
+**[podman(1)](podman.1.md)**, **[podman-network(1)](podman-network.1.md)**, **[podman-network-rm(1)](podman-network-rm.1.md)**
 
 ## HISTORY
 February 2021, Originally compiled by Brent Baude <bbaude@redhat.com>

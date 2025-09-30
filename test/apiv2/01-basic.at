@@ -11,6 +11,7 @@ t GET  /libpod/_ping 200 OK
 t HEAD /libpod/_ping 200
 
 t GET  _ping        200 OK
+like "$(<$WORKDIR/curl.headers.out)" $'.*\nOstype: ' "#19767 - undocumented part of docker API"
 t HEAD _ping        200
 t GET  libpod/_ping 200 OK
 t HEAD libpod/_ping 200
@@ -18,10 +19,10 @@ t HEAD libpod/_ping 200
 for i in /version version; do
     t GET  $i      200                               \
       .Components[0].Name="Podman Engine"            \
-      .Components[0].Details.APIVersion~3[0-9.-]\\+  \
-      .Components[0].Details.MinAPIVersion=3.1.0     \
+      .Components[0].Details.APIVersion~5[0-9.-]\\+  \
+      .Components[0].Details.MinAPIVersion=4.0.0     \
       .Components[0].Details.Os=linux                \
-      .ApiVersion=1.40                               \
+      .ApiVersion=1.41                               \
       .MinAPIVersion=1.24                            \
       .Os=linux
 done
@@ -82,7 +83,7 @@ else
 fi
 
 # Simple events test (see #7078)
-t GET "events?stream=false"  200
-t GET "libpod/events?stream=false"  200
+t GET "events?stream=false&since=30s"  200
+t GET "libpod/events?stream=false&since=30s"  200
 
 # vim: filetype=sh

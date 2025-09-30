@@ -1,13 +1,15 @@
-// +linux
+//go:build !remote
+
 package libpod
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
+	"github.com/containers/podman/v5/libpod/define"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -24,15 +26,15 @@ func (c *Container) pathAbs(path string) string {
 	return path
 }
 
-// resolveContainerPaths resolves the container's mount point and the container
+// resolvePath resolves the container's mount point and the container
 // path as specified by the user.  Both may resolve to paths outside of the
 // container's mount point when the container path hits a volume or bind mount.
 //
 // It returns a bool, indicating whether containerPath resolves outside of
 // mountPoint (e.g., via a mount or volume), the resolved root (e.g., container
 // mount, bind mount or volume) and the resolved path on the root (absolute to
-// the host).
-func (c *Container) resolvePath(mountPoint string, containerPath string) (string, string, error) {
+// the host). If the path is on a named volume, the volume is returned.
+func (c *Container) resolvePath(mountPoint string, containerPath string) (string, string, *Volume, error) {
 	// Let's first make sure we have a path relative to the mount point.
 	pathRelativeToContainerMountPoint := c.pathAbs(containerPath)
 	resolvedPathOnTheContainerMountPoint := filepath.Join(mountPoint, pathRelativeToContainerMountPoint)
@@ -52,21 +54,17 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 	for {
 		volume, err := findVolume(c, searchPath)
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		if volume != nil {
 			logrus.Debugf("Container path %q resolved to volume %q on path %q", containerPath, volume.Name(), searchPath)
 
-			// TODO: We really need to force the volume to mount
-			// before doing this, but that API is not exposed
-			// externally right now and doing so is beyond the scope
-			// of this commit.
 			mountPoint, err := volume.MountPoint()
 			if err != nil {
-				return "", "", err
+				return "", "", nil, err
 			}
 			if mountPoint == "" {
-				return "", "", errors.Errorf("volume %s is not mounted, cannot copy into it", volume.Name())
+				return "", "", nil, fmt.Errorf("volume %s is not mounted, cannot copy into it", volume.Name())
 			}
 
 			// We found a matching volume for searchPath.  We now
@@ -76,9 +74,9 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 			pathRelativeToVolume := strings.TrimPrefix(pathRelativeToContainerMountPoint, searchPath)
 			absolutePathOnTheVolumeMount, err := securejoin.SecureJoin(mountPoint, pathRelativeToVolume)
 			if err != nil {
-				return "", "", err
+				return "", "", nil, err
 			}
-			return mountPoint, absolutePathOnTheVolumeMount, nil
+			return mountPoint, absolutePathOnTheVolumeMount, volume, nil
 		}
 
 		if mount := findBindMount(c, searchPath); mount != nil {
@@ -90,9 +88,9 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 			pathRelativeToBindMount := strings.TrimPrefix(pathRelativeToContainerMountPoint, searchPath)
 			absolutePathOnTheBindMount, err := securejoin.SecureJoin(mount.Source, pathRelativeToBindMount)
 			if err != nil {
-				return "", "", err
+				return "", "", nil, err
 			}
-			return mount.Source, absolutePathOnTheBindMount, nil
+			return mount.Source, absolutePathOnTheBindMount, nil, nil
 		}
 
 		if searchPath == "/" {
@@ -104,7 +102,7 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 	}
 
 	// No volume, no bind mount but just a normal path on the container.
-	return mountPoint, resolvedPathOnTheContainerMountPoint, nil
+	return mountPoint, resolvedPathOnTheContainerMountPoint, nil, nil
 }
 
 // findVolume checks if the specified containerPath matches the destination
@@ -112,7 +110,7 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 func findVolume(c *Container, containerPath string) (*Volume, error) {
 	runtime := c.Runtime()
 	cleanedContainerPath := filepath.Clean(containerPath)
-	for _, vol := range c.Config().NamedVolumes {
+	for _, vol := range c.config.NamedVolumes {
 		if cleanedContainerPath == filepath.Clean(vol.Dest) {
 			return runtime.GetVolume(vol.Name)
 		}
@@ -120,15 +118,29 @@ func findVolume(c *Container, containerPath string) (*Volume, error) {
 	return nil, nil
 }
 
+// isSubDir checks whether path is a subdirectory of root.
+func isSubDir(path, root string) bool {
+	// check if the specified container path is below a bind mount.
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 // isPathOnVolume returns true if the specified containerPath is a subdir of any
 // Volume's destination.
 func isPathOnVolume(c *Container, containerPath string) bool {
 	cleanedContainerPath := filepath.Clean(containerPath)
-	for _, vol := range c.Config().NamedVolumes {
-		if cleanedContainerPath == filepath.Clean(vol.Dest) {
+	for _, vol := range c.config.NamedVolumes {
+		cleanedDestination := filepath.Clean(vol.Dest)
+		if cleanedContainerPath == cleanedDestination {
 			return true
 		}
-		for dest := vol.Dest; dest != "/" && dest != "."; dest = filepath.Dir(dest) {
+		if isSubDir(cleanedContainerPath, cleanedDestination) {
+			return true
+		}
+		for dest := cleanedDestination; dest != "/" && dest != "."; dest = filepath.Dir(dest) {
 			if cleanedContainerPath == dest {
 				return true
 			}
@@ -137,12 +149,12 @@ func isPathOnVolume(c *Container, containerPath string) bool {
 	return false
 }
 
-// findBindMounts checks if the specified containerPath matches the destination
+// findBindMount checks if the specified containerPath matches the destination
 // path of a Mount.  Returns a matching Mount or nil.
 func findBindMount(c *Container, containerPath string) *specs.Mount {
 	cleanedPath := filepath.Clean(containerPath)
-	for _, m := range c.Config().Spec.Mounts {
-		if m.Type != "bind" {
+	for _, m := range c.config.Spec.Mounts {
+		if m.Type != define.TypeBind {
 			continue
 		}
 		if cleanedPath == filepath.Clean(m.Destination) {
@@ -153,15 +165,19 @@ func findBindMount(c *Container, containerPath string) *specs.Mount {
 	return nil
 }
 
-/// isPathOnBindMount returns true if the specified containerPath is a subdir of any
+// / isPathOnMount returns true if the specified containerPath is a subdir of any
 // Mount's destination.
-func isPathOnBindMount(c *Container, containerPath string) bool {
+func isPathOnMount(c *Container, containerPath string) bool {
 	cleanedContainerPath := filepath.Clean(containerPath)
-	for _, m := range c.Config().Spec.Mounts {
-		if cleanedContainerPath == filepath.Clean(m.Destination) {
+	for _, m := range c.config.Spec.Mounts {
+		cleanedDestination := filepath.Clean(m.Destination)
+		if cleanedContainerPath == cleanedDestination {
 			return true
 		}
-		for dest := m.Destination; dest != "/"; dest = filepath.Dir(dest) {
+		if isSubDir(cleanedContainerPath, cleanedDestination) {
+			return true
+		}
+		for dest := cleanedDestination; dest != "/" && dest != "."; dest = filepath.Dir(dest) {
 			if cleanedContainerPath == dest {
 				return true
 			}

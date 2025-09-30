@@ -1,10 +1,12 @@
+//go:build !remote
+
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/api/handlers/compat"
-	"github.com/containers/podman/v3/pkg/api/handlers/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers/compat"
+	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
 )
 
@@ -17,16 +19,16 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	// parameters:
 	//  - in: body
 	//    name: create
-	//    description: attributes for creating a container
+	//    description: attributes for creating a volume
 	//    schema:
-	//      $ref: "#/definitions/VolumeCreate"
+	//      $ref: "#/definitions/VolumeCreateOptions"
 	// produces:
 	// - application/json
 	// responses:
 	//   '201':
-	//     $ref: "#/responses/VolumeCreateResponse"
+	//     $ref: "#/responses/volumeCreateResponse"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/volumes/create"), s.APIHandler(libpod.CreateVolume)).Methods(http.MethodPost)
 	// swagger:operation GET /libpod/volumes/{name}/exists libpod VolumeExistsLibpod
 	// ---
@@ -46,9 +48,9 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//   204:
 	//     description: volume exists
 	//   404:
-	//     $ref: '#/responses/NoSuchVolume'
+	//     $ref: '#/responses/volumeNotFound'
 	//   500:
-	//     $ref: '#/responses/InternalError'
+	//     $ref: '#/responses/internalError'
 	r.Handle(VersionedPath("/libpod/volumes/{name}/exists"), s.APIHandler(libpod.ExistsVolume)).Methods(http.MethodGet)
 	// swagger:operation GET /libpod/volumes/json libpod VolumeListLibpod
 	// ---
@@ -68,11 +70,12 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//        - label=<key> or label=<key>:<value> Matches volumes based on the presence of a label alone or a label and a value.
 	//        - name=<volume-name> Matches all of volume name.
 	//        - opt=<driver-option> Matches a storage driver options
+	//        - `until=<timestamp>` List volumes created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
 	// responses:
 	//   '200':
-	//     "$ref": "#/responses/VolumeList"
+	//     "$ref": "#/responses/volumeListLibpod"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/volumes/json"), s.APIHandler(libpod.ListVolumes)).Methods(http.MethodGet)
 	// swagger:operation POST /libpod/volumes/prune libpod VolumePruneLibpod
 	// ---
@@ -92,9 +95,9 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//        - `label` (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) Prune volumes with (or without, in case `label!=...` is used) the specified labels.
 	// responses:
 	//   '200':
-	//      "$ref": "#/responses/VolumePruneResponse"
+	//      "$ref": "#/responses/volumePruneLibpod"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/volumes/prune"), s.APIHandler(libpod.PruneVolumes)).Methods(http.MethodPost)
 	// swagger:operation GET /libpod/volumes/{name}/json libpod VolumeInspectLibpod
 	// ---
@@ -110,12 +113,12 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	// produces:
 	// - application/json
 	// responses:
-	//   '200':
-	//     "$ref": "#/responses/VolumeCreateResponse"
-	//   '404':
-	//     "$ref": "#/responses/NoSuchVolume"
-	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//   200:
+	//     $ref: "#/responses/volumeCreateResponse"
+	//   404:
+	//     $ref: "#/responses/volumeNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/volumes/{name}/json"), s.APIHandler(libpod.InspectVolume)).Methods(http.MethodGet)
 	// swagger:operation DELETE /libpod/volumes/{name} libpod VolumeDeleteLibpod
 	// ---
@@ -138,12 +141,66 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//   204:
 	//     description: no error
 	//   404:
-	//     $ref: "#/responses/NoSuchVolume"
+	//     $ref: "#/responses/volumeNotFound"
 	//   409:
 	//     description: Volume is in use and cannot be removed
 	//   500:
-	//     $ref: "#/responses/InternalError"
+	//     $ref: "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/volumes/{name}"), s.APIHandler(libpod.RemoveVolume)).Methods(http.MethodDelete)
+
+	// swagger:operation GET /libpod/volumes/{name}/export libpod VolumeExportLibpod
+	// ---
+	// tags:
+	//  - volumes
+	// summary: Export a volume
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or ID of the volume
+	// produces:
+	// - application/x-tar
+	// responses:
+	//   200:
+	//     description: no error
+	//     schema:
+	//      type: string
+	//      format: binary
+	//   404:
+	//     $ref: "#/responses/volumeNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
+	r.Handle(VersionedPath("/libpod/volumes/{name}/export"), s.APIHandler(libpod.ExportVolume)).Methods(http.MethodGet)
+
+	// swagger:operation POST /libpod/volumes/{name}/import libpod VolumeImportLibpod
+	// ---
+	// tags:
+	//  - volumes
+	// summary: Populate a volume by importing provided tar
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or ID of the volume
+	//  - in: body
+	//    name: inputStream
+	//    description: |
+	//      An uncompressed tar archive
+	//    schema:
+	//      type: string
+	//      format: binary
+	// produces:
+	// - application/json
+	// responses:
+	//   204:
+	//     description: Successful import
+	//   404:
+	//     $ref: "#/responses/volumeNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
+	r.Handle(VersionedPath("/libpod/volumes/{name}/import"), s.APIHandler(libpod.ImportVolume)).Methods(http.MethodPost)
 
 	/*
 	 * Docker compatibility endpoints
@@ -166,14 +223,15 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//        - driver=<volume-driver-name> Matches volumes based on their driver.
 	//        - label=<key> or label=<key>:<value> Matches volumes based on the presence of a label alone or a label and a value.
 	//        - name=<volume-name> Matches all of volume name.
+	//        - `until=<timestamp>` List volumes created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
 	//
 	//      Note:
 	//        The boolean `dangling` filter is not yet implemented for this endpoint.
 	// responses:
 	//   '200':
-	//     "$ref": "#/responses/VolumeListResponse"
+	//     "$ref": "#/responses/volumeList"
 	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/volumes"), s.APIHandler(compat.ListVolumes)).Methods(http.MethodGet)
 	r.Handle("/volumes", s.APIHandler(compat.ListVolumes)).Methods(http.MethodGet)
 
@@ -186,17 +244,17 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//  - in: body
 	//    name: create
 	//    description: |
-	//      attributes for creating a container.
+	//      attributes for creating a volume.
 	//      Note: If a volume by the same name exists, a 201 response with that volume's information will be generated.
 	//    schema:
-	//      $ref: "#/definitions/DockerVolumeCreate"
+	//      $ref: "#/definitions/volumeCreate"
 	// produces:
 	// - application/json
 	// responses:
 	//   '201':
-	//     "$ref": "#/responses/DockerVolumeInfoResponse"
+	//     "$ref": "#/responses/volumeInspect"
 	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/volumes/create"), s.APIHandler(compat.CreateVolume)).Methods(http.MethodPost)
 	r.Handle("/volumes/create", s.APIHandler(compat.CreateVolume)).Methods(http.MethodPost)
 
@@ -214,12 +272,12 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	// produces:
 	// - application/json
 	// responses:
-	//   '200':
-	//     "$ref": "#/responses/DockerVolumeInfoResponse"
-	//   '404':
-	//     "$ref": "#/responses/NoSuchVolume"
-	//   '500':
-	//     "$ref": "#/responses/InternalError"
+	//   200:
+	//     $ref: "#/responses/volumeInspect"
+	//   40':
+	//     $ref: "#/responses/volumeNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
 	r.Handle(VersionedPath("/volumes/{name}"), s.APIHandler(compat.InspectVolume)).Methods(http.MethodGet)
 	r.Handle("/volumes/{name}", s.APIHandler(compat.InspectVolume)).Methods(http.MethodGet)
 
@@ -247,11 +305,11 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//   204:
 	//     description: no error
 	//   404:
-	//     "$ref": "#/responses/NoSuchVolume"
+	//     $ref: "#/responses/volumeNotFound"
 	//   409:
 	//     description: Volume is in use and cannot be removed
 	//   500:
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/volumes/{name}"), s.APIHandler(compat.RemoveVolume)).Methods(http.MethodDelete)
 	r.Handle("/volumes/{name}", s.APIHandler(compat.RemoveVolume)).Methods(http.MethodDelete)
 
@@ -273,9 +331,9 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//        - `label` (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) Prune volumes with (or without, in case `label!=...` is used) the specified labels.
 	// responses:
 	//   '200':
-	//      "$ref": "#/responses/DockerVolumePruneResponse"
+	//      "$ref": "#/responses/volumePruneResponse"
 	//   '500':
-	//      "$ref": "#/responses/InternalError"
+	//      "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/volumes/prune"), s.APIHandler(compat.PruneVolumes)).Methods(http.MethodPost)
 	r.Handle("/volumes/prune", s.APIHandler(compat.PruneVolumes)).Methods(http.MethodPost)
 

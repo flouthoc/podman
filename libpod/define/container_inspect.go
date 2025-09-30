@@ -1,10 +1,19 @@
 package define
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
-	"github.com/containers/image/v5/manifest"
+	"github.com/containers/podman/v5/pkg/signal"
+	"go.podman.io/image/v5/manifest"
 )
+
+type InspectIDMappings struct {
+	UIDMap []string `json:"UidMap"`
+	GIDMap []string `json:"GidMap"`
+}
 
 // InspectContainerConfig holds further data about how a container was initially
 // configured.
@@ -39,7 +48,7 @@ type InspectContainerConfig struct {
 	// Container working directory
 	WorkingDir string `json:"WorkingDir"`
 	// Container entrypoint
-	Entrypoint string `json:"Entrypoint"`
+	Entrypoint []string `json:"Entrypoint"`
 	// On-build arguments - presently unused. More of Buildah's domain.
 	OnBuild *string `json:"OnBuild"`
 	// Container labels
@@ -47,9 +56,21 @@ type InspectContainerConfig struct {
 	// Container annotations
 	Annotations map[string]string `json:"Annotations"`
 	// Container stop signal
-	StopSignal uint `json:"StopSignal"`
+	StopSignal string `json:"StopSignal"`
+	// Configured startup healthcheck for the container
+	StartupHealthCheck *StartupHealthCheck `json:"StartupHealthCheck,omitempty"`
 	// Configured healthcheck for the container
 	Healthcheck *manifest.Schema2HealthConfig `json:"Healthcheck,omitempty"`
+	// HealthcheckOnFailureAction defines an action to take once the container turns unhealthy.
+	HealthcheckOnFailureAction string `json:"HealthcheckOnFailureAction,omitempty"`
+	// HealthLogDestination defines the destination where the log is stored
+	HealthLogDestination string `json:"HealthLogDestination,omitempty"`
+	// HealthMaxLogCount is maximum number of attempts in the HealthCheck log file.
+	// ('0' value means an infinite number of attempts in the log file)
+	HealthMaxLogCount uint `json:"HealthcheckMaxLogCount,omitempty"`
+	// HealthMaxLogSize is the maximum length in characters of stored HealthCheck log
+	// ("0" value means an infinite log length)
+	HealthMaxLogSize uint `json:"HealthcheckMaxLogSize,omitempty"`
 	// CreateCommand is the full command plus arguments of the process the
 	// container has been created with.
 	CreateCommand []string `json:"CreateCommand,omitempty"`
@@ -68,6 +89,89 @@ type InspectContainerConfig struct {
 	Timeout uint `json:"Timeout"`
 	// StopTimeout is time before container is stopped when calling stop
 	StopTimeout uint `json:"StopTimeout"`
+	// Passwd determines whether or not podman can add entries to /etc/passwd and /etc/group
+	Passwd *bool `json:"Passwd,omitempty"`
+	// ChrootDirs is an additional set of directories that need to be
+	// treated as root directories. Standard bind mounts will be mounted
+	// into paths relative to these directories.
+	ChrootDirs []string `json:"ChrootDirs,omitempty"`
+	// SdNotifyMode is the sd-notify mode of the container.
+	SdNotifyMode string `json:"sdNotifyMode,omitempty"`
+	// SdNotifySocket is the NOTIFY_SOCKET in use by/configured for the container.
+	SdNotifySocket string `json:"sdNotifySocket,omitempty"`
+	// ExposedPorts includes ports the container has exposed.
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
+
+	// V4PodmanCompatMarshal indicates that the json marshaller should
+	// use the old v4 inspect format to keep API compatibility.
+	V4PodmanCompatMarshal bool `json:"-"`
+}
+
+// UnmarshalJSON allow compatibility with podman V4 API
+func (insp *InspectContainerConfig) UnmarshalJSON(data []byte) error {
+	type Alias InspectContainerConfig
+	aux := &struct {
+		Entrypoint any `json:"Entrypoint"`
+		StopSignal any `json:"StopSignal"`
+		*Alias
+	}{
+		Alias: (*Alias)(insp),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	switch entrypoint := aux.Entrypoint.(type) {
+	case string:
+		insp.Entrypoint = strings.Split(entrypoint, " ")
+	case []string:
+		insp.Entrypoint = entrypoint
+	case []any:
+		insp.Entrypoint = []string{}
+		for _, entry := range entrypoint {
+			if str, ok := entry.(string); ok {
+				insp.Entrypoint = append(insp.Entrypoint, str)
+			}
+		}
+	case nil:
+		insp.Entrypoint = []string{}
+	default:
+		return fmt.Errorf("cannot unmarshal Config.Entrypoint of type  %T", entrypoint)
+	}
+
+	switch stopsignal := aux.StopSignal.(type) {
+	case string:
+		insp.StopSignal = stopsignal
+	case float64:
+		insp.StopSignal = signal.ToDockerFormat(uint(stopsignal))
+	case nil:
+		break
+	default:
+		return fmt.Errorf("cannot unmarshal Config.StopSignal of type  %T", stopsignal)
+	}
+	return nil
+}
+
+func (insp *InspectContainerConfig) MarshalJSON() ([]byte, error) {
+	// the alias is needed otherwise MarshalJSON will
+	type Alias InspectContainerConfig
+	conf := (*Alias)(insp)
+	if !insp.V4PodmanCompatMarshal {
+		return json.Marshal(conf)
+	}
+
+	type v4InspectContainerConfig struct {
+		Entrypoint string `json:"Entrypoint"`
+		StopSignal uint   `json:"StopSignal"`
+		*Alias
+	}
+	stopSignal, _ := signal.ParseSignal(insp.StopSignal)
+	newConf := &v4InspectContainerConfig{
+		Entrypoint: strings.Join(insp.Entrypoint, " "),
+		StopSignal: uint(stopSignal),
+		Alias:      conf,
+	}
+	return json.Marshal(newConf)
 }
 
 // InspectRestartPolicy holds information about the container's restart policy.
@@ -89,7 +193,7 @@ type InspectRestartPolicy struct {
 // InspectLogConfig holds information about a container's configured log driver
 type InspectLogConfig struct {
 	Type   string            `json:"Type"`
-	Config map[string]string `json:"Config"` //idk type, TODO
+	Config map[string]string `json:"Config"`
 	// Path specifies a path to the log file
 	Path string `json:"Path"`
 	// Tag specifies a custom log tag for the container
@@ -181,6 +285,9 @@ type InspectMount struct {
 	// Mount propagation for the mount. Can be empty if not specified, but
 	// is always printed - no omitempty.
 	Propagation string `json:"Propagation"`
+	// SubPath object from the volume. Specified as a path within
+	// the source volume to be mounted at the Destination.
+	SubPath string `json:"SubPath,omitempty"`
 }
 
 // InspectContainerState provides a detailed record of a container's current
@@ -189,25 +296,40 @@ type InspectMount struct {
 // Docker, but here we see more fields that are unused (nonsensical in the
 // context of Libpod).
 type InspectContainerState struct {
-	OciVersion  string             `json:"OciVersion"`
-	Status      string             `json:"Status"`
-	Running     bool               `json:"Running"`
-	Paused      bool               `json:"Paused"`
-	Restarting  bool               `json:"Restarting"` // TODO
-	OOMKilled   bool               `json:"OOMKilled"`
-	Dead        bool               `json:"Dead"`
-	Pid         int                `json:"Pid"`
-	ConmonPid   int                `json:"ConmonPid,omitempty"`
-	ExitCode    int32              `json:"ExitCode"`
-	Error       string             `json:"Error"` // TODO
-	StartedAt   time.Time          `json:"StartedAt"`
-	FinishedAt  time.Time          `json:"FinishedAt"`
-	Healthcheck HealthCheckResults `json:"Healthcheck,omitempty"`
+	OciVersion     string              `json:"OciVersion"`
+	Status         string              `json:"Status"`
+	Running        bool                `json:"Running"`
+	Paused         bool                `json:"Paused"`
+	Restarting     bool                `json:"Restarting"` // TODO
+	OOMKilled      bool                `json:"OOMKilled"`
+	Dead           bool                `json:"Dead"`
+	Pid            int                 `json:"Pid"`
+	ConmonPid      int                 `json:"ConmonPid,omitempty"`
+	ExitCode       int32               `json:"ExitCode"`
+	Error          string              `json:"Error"` // TODO
+	StartedAt      time.Time           `json:"StartedAt"`
+	FinishedAt     time.Time           `json:"FinishedAt"`
+	Health         *HealthCheckResults `json:"Health,omitempty"`
+	Checkpointed   bool                `json:"Checkpointed,omitempty"`
+	CgroupPath     string              `json:"CgroupPath,omitempty"`
+	CheckpointedAt time.Time           `json:"CheckpointedAt"`
+	RestoredAt     time.Time           `json:"RestoredAt"`
+	CheckpointLog  string              `json:"CheckpointLog,omitempty"`
+	CheckpointPath string              `json:"CheckpointPath,omitempty"`
+	RestoreLog     string              `json:"RestoreLog,omitempty"`
+	Restored       bool                `json:"Restored,omitempty"`
+	StoppedByUser  bool                `json:"StoppedByUser,omitempty"`
+}
+
+// Healthcheck returns the HealthCheckResults. This is used for old podman compat
+// to make the "Healthcheck" key available in the go template.
+func (s *InspectContainerState) Healthcheck() *HealthCheckResults {
+	return s.Health
 }
 
 // HealthCheckResults describes the results/logs from a healthcheck
 type HealthCheckResults struct {
-	// Status healthy or unhealthy
+	// Status starting, healthy or unhealthy
 	Status string `json:"Status"`
 	// FailingStreak is the number of consecutive failed healthchecks
 	FailingStreak int `json:"FailingStreak"`
@@ -234,9 +356,6 @@ type HealthCheckLog struct {
 // as possible from the spec and container config.
 // Some things cannot be inferred. These will be populated by spec annotations
 // (if available).
-// Field names are fixed for compatibility and cannot be changed.
-// As such, silence lint warnings about them.
-//nolint
 type InspectContainerHostConfig struct {
 	// Binds contains an array of user-added mounts.
 	// Both volume mounts and named volumes are included.
@@ -284,6 +403,14 @@ type InspectContainerHostConfig struct {
 	// It is not handled directly within libpod and is stored in an
 	// annotation.
 	AutoRemove bool `json:"AutoRemove"`
+	// AutoRemoveImage is whether the container's image will be
+	// automatically removed on exiting.
+	// It is not handled directly within libpod and is stored in an
+	// annotation.
+	AutoRemoveImage bool `json:"AutoRemoveImage"`
+	// Annotations are provided to the runtime when the container is
+	// started.
+	Annotations map[string]string `json:"Annotations"`
 	// VolumeDriver is presently unused and is retained for Docker
 	// compatibility.
 	VolumeDriver string `json:"VolumeDriver"`
@@ -311,9 +438,11 @@ type InspectContainerHostConfig struct {
 	// DnsSearch is a list of DNS search domains that will be set in the
 	// container's resolv.conf
 	DnsSearch []string `json:"DnsSearch"`
-	// ExtraHosts contains hosts that will be aded to the container's
+	// ExtraHosts contains hosts that will be added to the container's
 	// /etc/hosts.
 	ExtraHosts []string `json:"ExtraHosts"`
+	// HostsFile is the base file to create the `/etc/hosts` file inside the container.
+	HostsFile string `json:"HostsFile"`
 	// GroupAdd contains groups that the user inside the container will be
 	// added to.
 	GroupAdd []string `json:"GroupAdd"`
@@ -329,9 +458,9 @@ type InspectContainerHostConfig struct {
 	// populated.
 	// TODO.
 	Cgroup string `json:"Cgroup"`
-	// Cgroups contains the container's CGroup mode.
-	// Allowed values are "default" (container is creating CGroups) and
-	// "disabled" (container is not creating CGroups).
+	// Cgroups contains the container's Cgroup mode.
+	// Allowed values are "default" (container is creating Cgroups) and
+	// "disabled" (container is not creating Cgroups).
 	// This is Libpod-specific and not included in `docker inspect`.
 	Cgroups string `json:"Cgroups"`
 	// Links is unused, and provided purely for Docker compatibility.
@@ -385,7 +514,10 @@ type InspectContainerHostConfig struct {
 	// TODO Rootless has an additional 'keep-id' option, presently not
 	// reflected here.
 	UsernsMode string `json:"UsernsMode"`
+	// IDMappings is the UIDMapping and GIDMapping used within the container
+	IDMappings *InspectIDMappings `json:"IDMappings,omitempty"`
 	// ShmSize is the size of the container's SHM device.
+
 	ShmSize int64 `json:"ShmSize"`
 	// Runtime is provided purely for Docker compatibility.
 	// It is set unconditionally to "oci" as Podman does not presently
@@ -401,7 +533,7 @@ type InspectContainerHostConfig struct {
 	Isolation string `json:"Isolation"`
 	// CpuShares indicates the CPU resources allocated to the container.
 	// It is a relative weight in the scheduler for assigning CPU time
-	// versus other CGroups.
+	// versus other Cgroups.
 	CpuShares uint64 `json:"CpuShares"`
 	// Memory indicates the memory resources allocated to the container.
 	// This is the limit (in bytes) of RAM the container may use.
@@ -418,12 +550,12 @@ type InspectContainerHostConfig struct {
 	// 100000, we will set both CpuQuota, CpuPeriod, and NanoCpus. If
 	// CpuQuota is not the default, we will not set NanoCpus.
 	NanoCpus int64 `json:"NanoCpus"`
-	// CgroupParent is the CGroup parent of the container.
+	// CgroupParent is the Cgroup parent of the container.
 	// Only set if not default.
 	CgroupParent string `json:"CgroupParent"`
 	// BlkioWeight indicates the I/O resources allocated to the container.
 	// It is a relative weight in the scheduler for assigning I/O time
-	// versus other CGroups.
+	// versus other Cgroups.
 	BlkioWeight uint16 `json:"BlkioWeight"`
 	// BlkioWeightDevice is an array of I/O resource priorities for
 	// individual device nodes.
@@ -480,8 +612,8 @@ type InspectContainerHostConfig struct {
 	// CpuRealtimeRuntime is the length of time (in microseconds) allocated
 	// for realtime tasks within every CpuRealtimePeriod.
 	CpuRealtimeRuntime int64 `json:"CpuRealtimeRuntime"`
-	// CpusetCpus is the is the set of CPUs that the container will execute
-	// on. Formatted as `0-3` or `0,2`. Default (if unset) is all CPUs.
+	// CpusetCpus is the set of CPUs that the container will execute on.
+	// Formatted as `0-3` or `0,2`. Default (if unset) is all CPUs.
 	CpusetCpus string `json:"CpusetCpus"`
 	// CpusetMems is the set of memory nodes the container will use.
 	// Formatted as `0-3` or `0,2`. Default (if unset) is all memory nodes.
@@ -518,7 +650,7 @@ type InspectContainerHostConfig struct {
 	OomKillDisable bool `json:"OomKillDisable"`
 	// Init indicates whether the container has an init mounted into it.
 	Init bool `json:"Init,omitempty"`
-	// PidsLimit is the maximum number of PIDs what may be created within
+	// PidsLimit is the maximum number of PIDs that may be created within
 	// the container. 0, the default, indicates no limit.
 	PidsLimit int64 `json:"PidsLimit"`
 	// Ulimits is a set of ulimits that will be set within the container.
@@ -533,6 +665,15 @@ type InspectContainerHostConfig struct {
 	IOMaximumBandwidth uint64 `json:"IOMaximumBandwidth"`
 	// CgroupConf is the configuration for cgroup v2.
 	CgroupConf map[string]string `json:"CgroupConf"`
+	// IntelRdtClosID defines the Intel RDT CAT Class Of Service (COS) that
+	// all processes of the container should run in.
+	IntelRdtClosID string `json:"IntelRdtClosID,omitempty"`
+}
+
+// Address represents an IP address.
+type Address struct {
+	Addr         string
+	PrefixLength int
 }
 
 // InspectBasicNetworkConfig holds basic configuration information (e.g. IP
@@ -549,7 +690,7 @@ type InspectBasicNetworkConfig struct {
 	IPPrefixLen int `json:"IPPrefixLen"`
 	// SecondaryIPAddresses is a list of extra IP Addresses that the
 	// container has been assigned in this network.
-	SecondaryIPAddresses []string `json:"SecondaryIPAddresses,omitempty"`
+	SecondaryIPAddresses []Address `json:"SecondaryIPAddresses,omitempty"`
 	// IPv6Gateway is the IPv6 gateway this network will use.
 	IPv6Gateway string `json:"IPv6Gateway"`
 	// GlobalIPv6Address is the global-scope IPv6 Address for this network.
@@ -558,7 +699,7 @@ type InspectBasicNetworkConfig struct {
 	GlobalIPv6PrefixLen int `json:"GlobalIPv6PrefixLen"`
 	// SecondaryIPv6Addresses is a list of extra IPv6 Addresses that the
 	// container has been assigned in this network.
-	SecondaryIPv6Addresses []string `json:"SecondaryIPv6Addresses,omitempty"`
+	SecondaryIPv6Addresses []Address `json:"SecondaryIPv6Addresses,omitempty"`
 	// MacAddress is the MAC address for the interface in this network.
 	MacAddress string `json:"MacAddress"`
 	// AdditionalMacAddresses is a set of additional MAC Addresses beyond
@@ -567,7 +708,7 @@ type InspectBasicNetworkConfig struct {
 	AdditionalMacAddresses []string `json:"AdditionalMACAddresses,omitempty"`
 }
 
-// InspectAdditionalNetwork holds information about non-default CNI networks the
+// InspectAdditionalNetwork holds information about non-default networks the
 // container has been connected to.
 // As with InspectNetworkSettings, many fields are unused and maintained only
 // for compatibility with Docker.
@@ -603,7 +744,7 @@ type InspectNetworkSettings struct {
 	LinkLocalIPv6PrefixLen int                          `json:"LinkLocalIPv6PrefixLen"`
 	Ports                  map[string][]InspectHostPort `json:"Ports"`
 	SandboxKey             string                       `json:"SandboxKey"`
-	// Networks contains information on non-default CNI networks this
+	// Networks contains information on non-default networks this
 	// container has joined.
 	// It is a map of network name to network information.
 	Networks map[string]*InspectAdditionalNetwork `json:"Networks,omitempty"`
@@ -615,43 +756,48 @@ type InspectNetworkSettings struct {
 // compatible with `docker inspect` JSON, but additional fields have been added
 // as required to share information not in the original output.
 type InspectContainerData struct {
-	ID              string                      `json:"Id"`
-	Created         time.Time                   `json:"Created"`
-	Path            string                      `json:"Path"`
-	Args            []string                    `json:"Args"`
-	State           *InspectContainerState      `json:"State"`
-	Image           string                      `json:"Image"`
-	ImageName       string                      `json:"ImageName"`
-	Rootfs          string                      `json:"Rootfs"`
-	Pod             string                      `json:"Pod"`
-	ResolvConfPath  string                      `json:"ResolvConfPath"`
-	HostnamePath    string                      `json:"HostnamePath"`
-	HostsPath       string                      `json:"HostsPath"`
-	StaticDir       string                      `json:"StaticDir"`
-	OCIConfigPath   string                      `json:"OCIConfigPath,omitempty"`
-	OCIRuntime      string                      `json:"OCIRuntime,omitempty"`
-	ConmonPidFile   string                      `json:"ConmonPidFile"`
-	PidFile         string                      `json:"PidFile"`
-	Name            string                      `json:"Name"`
-	RestartCount    int32                       `json:"RestartCount"`
-	Driver          string                      `json:"Driver"`
-	MountLabel      string                      `json:"MountLabel"`
-	ProcessLabel    string                      `json:"ProcessLabel"`
-	AppArmorProfile string                      `json:"AppArmorProfile"`
-	EffectiveCaps   []string                    `json:"EffectiveCaps"`
-	BoundingCaps    []string                    `json:"BoundingCaps"`
-	ExecIDs         []string                    `json:"ExecIDs"`
-	GraphDriver     *DriverData                 `json:"GraphDriver"`
-	SizeRw          *int64                      `json:"SizeRw,omitempty"`
-	SizeRootFs      int64                       `json:"SizeRootFs,omitempty"`
-	Mounts          []InspectMount              `json:"Mounts"`
-	Dependencies    []string                    `json:"Dependencies"`
-	NetworkSettings *InspectNetworkSettings     `json:"NetworkSettings"` //TODO
-	ExitCommand     []string                    `json:"ExitCommand"`
-	Namespace       string                      `json:"Namespace"`
-	IsInfra         bool                        `json:"IsInfra"`
-	Config          *InspectContainerConfig     `json:"Config"`
-	HostConfig      *InspectContainerHostConfig `json:"HostConfig"`
+	ID                      string                      `json:"Id"`
+	Created                 time.Time                   `json:"Created"`
+	Path                    string                      `json:"Path"`
+	Args                    []string                    `json:"Args"`
+	State                   *InspectContainerState      `json:"State"`
+	Image                   string                      `json:"Image"`
+	ImageDigest             string                      `json:"ImageDigest"`
+	ImageName               string                      `json:"ImageName"`
+	Rootfs                  string                      `json:"Rootfs"`
+	Pod                     string                      `json:"Pod"`
+	ResolvConfPath          string                      `json:"ResolvConfPath"`
+	HostnamePath            string                      `json:"HostnamePath"`
+	HostsPath               string                      `json:"HostsPath"`
+	StaticDir               string                      `json:"StaticDir"`
+	OCIConfigPath           string                      `json:"OCIConfigPath,omitempty"`
+	OCIRuntime              string                      `json:"OCIRuntime,omitempty"`
+	ConmonPidFile           string                      `json:"ConmonPidFile"`
+	PidFile                 string                      `json:"PidFile"`
+	Name                    string                      `json:"Name"`
+	RestartCount            int32                       `json:"RestartCount"`
+	Driver                  string                      `json:"Driver"`
+	MountLabel              string                      `json:"MountLabel"`
+	ProcessLabel            string                      `json:"ProcessLabel"`
+	AppArmorProfile         string                      `json:"AppArmorProfile"`
+	EffectiveCaps           []string                    `json:"EffectiveCaps"`
+	BoundingCaps            []string                    `json:"BoundingCaps"`
+	ExecIDs                 []string                    `json:"ExecIDs"`
+	GraphDriver             *DriverData                 `json:"GraphDriver"`
+	SizeRw                  *int64                      `json:"SizeRw,omitempty"`
+	SizeRootFs              int64                       `json:"SizeRootFs,omitempty"`
+	Mounts                  []InspectMount              `json:"Mounts"`
+	Dependencies            []string                    `json:"Dependencies"`
+	NetworkSettings         *InspectNetworkSettings     `json:"NetworkSettings"`
+	Namespace               string                      `json:"Namespace"`
+	IsInfra                 bool                        `json:"IsInfra"`
+	IsService               bool                        `json:"IsService"`
+	KubeExitCodePropagation string                      `json:"KubeExitCodePropagation"`
+	LockNumber              uint32                      `json:"lockNumber"`
+	Config                  *InspectContainerConfig     `json:"Config"`
+	HostConfig              *InspectContainerHostConfig `json:"HostConfig"`
+	UseImageHosts           bool                        `json:"UseImageHosts"`
+	UseImageHostname        bool                        `json:"UseImageHostname"`
 }
 
 // InspectExecSession contains information about a given exec session.

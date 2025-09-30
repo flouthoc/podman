@@ -1,20 +1,24 @@
-// +build linux,cgo
+//go:build (linux || freebsd) && cgo
 
 package shm
 
 // #cgo LDFLAGS: -lrt -lpthread
 // #cgo CFLAGS: -Wall -Werror
 // #include <stdlib.h>
+// #include <sys/types.h>
+// #include <sys/mman.h>
+// #include <fcntl.h>
 // #include "shm_lock.h"
 // const uint32_t bitmap_size_c = BITMAP_SIZE;
 import "C"
 
 import (
+	"errors"
+	"fmt"
 	"runtime"
 	"syscall"
 	"unsafe"
 
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -27,7 +31,7 @@ var (
 
 // SHMLocks is a struct enabling POSIX semaphore locking in a shared memory
 // segment.
-type SHMLocks struct { // nolint
+type SHMLocks struct {
 	lockStruct *C.shm_struct_t
 	maxLocks   uint32
 	valid      bool
@@ -39,7 +43,7 @@ type SHMLocks struct { // nolint
 // size used by the underlying implementation.
 func CreateSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
 	if numLocks == 0 {
-		return nil, errors.Wrapf(syscall.EINVAL, "number of locks must be greater than 0")
+		return nil, fmt.Errorf("number of locks must be greater than 0: %w", syscall.EINVAL)
 	}
 
 	locks := new(SHMLocks)
@@ -51,7 +55,7 @@ func CreateSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
 	lockStruct := C.setup_lock_shm(cPath, C.uint32_t(numLocks), &errCode)
 	if lockStruct == nil {
 		// We got a null pointer, so something errored
-		return nil, errors.Wrapf(syscall.Errno(-1*errCode), "failed to create %d locks in %s", numLocks, path)
+		return nil, fmt.Errorf("failed to create %d locks in %s: %w", numLocks, path, syscall.Errno(-1*errCode))
 	}
 
 	locks.lockStruct = lockStruct
@@ -68,7 +72,7 @@ func CreateSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
 // segment was created with.
 func OpenSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
 	if numLocks == 0 {
-		return nil, errors.Wrapf(syscall.EINVAL, "number of locks must be greater than 0")
+		return nil, fmt.Errorf("number of locks must be greater than 0: %w", syscall.EINVAL)
 	}
 
 	locks := new(SHMLocks)
@@ -80,7 +84,7 @@ func OpenSHMLock(path string, numLocks uint32) (*SHMLocks, error) {
 	lockStruct := C.open_lock_shm(cPath, C.uint32_t(numLocks), &errCode)
 	if lockStruct == nil {
 		// We got a null pointer, so something errored
-		return nil, errors.Wrapf(syscall.Errno(-1*errCode), "failed to open %d locks in %s", numLocks, path)
+		return nil, fmt.Errorf("failed to open %d locks in %s: %w", numLocks, path, syscall.Errno(-1*errCode))
 	}
 
 	locks.lockStruct = lockStruct
@@ -102,7 +106,7 @@ func (locks *SHMLocks) GetMaxLocks() uint32 {
 // Close() is only intended to be used while testing the locks.
 func (locks *SHMLocks) Close() error {
 	if !locks.valid {
-		return errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	locks.valid = false
@@ -123,15 +127,24 @@ func (locks *SHMLocks) Close() error {
 // created will result in an error, and no semaphore will be allocated.
 func (locks *SHMLocks) AllocateSemaphore() (uint32, error) {
 	if !locks.valid {
-		return 0, errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return 0, fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	// This returns a U64, so we have the full u32 range available for
 	// semaphore indexes, and can still return error codes.
 	retCode := C.allocate_semaphore(locks.lockStruct)
 	if retCode < 0 {
+		var err = syscall.Errno(-1 * retCode)
 		// Negative errno returned
-		return 0, syscall.Errno(-1 * retCode)
+		if errors.Is(err, syscall.ENOSPC) {
+			// ENOSPC expands to "no space left on device".  While it is technically true
+			// that there's no room in the SHM inn for this lock, this tends to send normal people
+			// down the path of checking disk-space which is not actually their problem.
+			// Give a clue that it's actually due to num_locks filling up.
+			var errFull = fmt.Errorf("allocation failed; exceeded num_locks (%d)", locks.maxLocks)
+			return uint32(retCode), errFull
+		}
+		return uint32(retCode), syscall.Errno(-1 * retCode)
 	}
 
 	return uint32(retCode), nil
@@ -143,7 +156,7 @@ func (locks *SHMLocks) AllocateSemaphore() (uint32, error) {
 // returned.
 func (locks *SHMLocks) AllocateGivenSemaphore(sem uint32) error {
 	if !locks.valid {
-		return errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	retCode := C.allocate_given_semaphore(locks.lockStruct, C.uint32_t(sem))
@@ -159,11 +172,11 @@ func (locks *SHMLocks) AllocateGivenSemaphore(sem uint32) error {
 // The given semaphore must be already allocated, or an error will be returned.
 func (locks *SHMLocks) DeallocateSemaphore(sem uint32) error {
 	if !locks.valid {
-		return errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	if sem > locks.maxLocks {
-		return errors.Wrapf(syscall.EINVAL, "given semaphore %d is higher than maximum locks count %d", sem, locks.maxLocks)
+		return fmt.Errorf("given semaphore %d is higher than maximum locks count %d: %w", sem, locks.maxLocks, syscall.EINVAL)
 	}
 
 	retCode := C.deallocate_semaphore(locks.lockStruct, C.uint32_t(sem))
@@ -179,7 +192,7 @@ func (locks *SHMLocks) DeallocateSemaphore(sem uint32) error {
 // other containers and pods.
 func (locks *SHMLocks) DeallocateAllSemaphores() error {
 	if !locks.valid {
-		return errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	retCode := C.deallocate_all_semaphores(locks.lockStruct)
@@ -200,11 +213,11 @@ func (locks *SHMLocks) DeallocateAllSemaphores() error {
 // succeed.
 func (locks *SHMLocks) LockSemaphore(sem uint32) error {
 	if !locks.valid {
-		return errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	if sem > locks.maxLocks {
-		return errors.Wrapf(syscall.EINVAL, "given semaphore %d is higher than maximum locks count %d", sem, locks.maxLocks)
+		return fmt.Errorf("given semaphore %d is higher than maximum locks count %d: %w", sem, locks.maxLocks, syscall.EINVAL)
 	}
 
 	// For pthread mutexes, we have to guarantee lock and unlock happen in
@@ -228,11 +241,11 @@ func (locks *SHMLocks) LockSemaphore(sem uint32) error {
 // succeed.
 func (locks *SHMLocks) UnlockSemaphore(sem uint32) error {
 	if !locks.valid {
-		return errors.Wrapf(syscall.EINVAL, "locks have already been closed")
+		return fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
 	}
 
 	if sem > locks.maxLocks {
-		return errors.Wrapf(syscall.EINVAL, "given semaphore %d is higher than maximum locks count %d", sem, locks.maxLocks)
+		return fmt.Errorf("given semaphore %d is higher than maximum locks count %d: %w", sem, locks.maxLocks, syscall.EINVAL)
 	}
 
 	retCode := C.unlock_semaphore(locks.lockStruct, C.uint32_t(sem))
@@ -248,5 +261,55 @@ func (locks *SHMLocks) UnlockSemaphore(sem uint32) error {
 	// LockOSThread()
 	runtime.UnlockOSThread()
 
+	return nil
+}
+
+// GetFreeLocks gets the number of locks available to be allocated.
+func (locks *SHMLocks) GetFreeLocks() (uint32, error) {
+	if !locks.valid {
+		return 0, fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
+	}
+
+	retCode := C.available_locks(locks.lockStruct)
+	if retCode < 0 {
+		// Negative errno returned
+		return 0, syscall.Errno(-1 * retCode)
+	}
+
+	return uint32(retCode), nil
+}
+
+// Get a list of locks that are currently taken.
+func (locks *SHMLocks) GetTakenLocks() ([]uint32, error) {
+	if !locks.valid {
+		return nil, fmt.Errorf("locks have already been closed: %w", syscall.EINVAL)
+	}
+
+	var usedLocks []uint32
+
+	// I don't think we need to lock the OS thread here, since the lock (if
+	// taken) is immediately released, and Go shouldn't reschedule the CGo
+	// to another thread before the function finished executing.
+	var i uint32
+	for i = 0; i < locks.maxLocks; i++ {
+		retCode := C.try_lock(locks.lockStruct, C.uint32_t(i))
+		if retCode < 0 {
+			return nil, syscall.Errno(-1 * retCode)
+		}
+		if retCode == 0 {
+			usedLocks = append(usedLocks, i)
+		}
+	}
+
+	return usedLocks, nil
+}
+
+func unlinkSHMLock(path string) error {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	if _, err := C.shm_unlink(cPath); err != nil {
+		return fmt.Errorf("failed to unlink SHM locks: %w", err)
+	}
 	return nil
 }

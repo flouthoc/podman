@@ -1,24 +1,32 @@
 package handlers
 
 import (
-	"context"
-	"time"
-
-	"github.com/containers/common/libimage"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	docker "github.com/docker/docker/api/types"
+	dockerBackend "github.com/docker/docker/api/types/backend"
 	dockerContainer "github.com/docker/docker/api/types/container"
+	dockerImage "github.com/docker/docker/api/types/image"
 	dockerNetwork "github.com/docker/docker/api/types/network"
-	"github.com/docker/go-connections/nat"
-	"github.com/pkg/errors"
+	"github.com/docker/docker/api/types/registry"
+	"github.com/docker/docker/api/types/system"
+	"github.com/docker/docker/api/types/volume"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 type AuthConfig struct {
-	docker.AuthConfig
+	registry.AuthConfig
 }
 
 type ImageInspect struct {
-	docker.ImageInspect
+	dockerImage.InspectResponse
+	// When you embed a struct, the fields of the embedded struct are "promoted" to the outer struct.
+	// If a field in the outer struct has the same name as a field in the embedded struct,
+	// the outer struct's field will shadow or override the embedded one allowing for a clean way to
+	// hide fields from the swagger spec that still exist in the libraries struct.
+	Container       string `json:"-"`
+	ContainerConfig string `json:"-"`
+	VirtualSize     string `json:"-"`
 }
 
 type ContainerConfig struct {
@@ -37,18 +45,51 @@ type LibpodImagesRemoveReport struct {
 	Errors []string
 }
 
-type ContainersPruneReport struct {
-	docker.ContainersPruneReport
+// LibpodImagesResolveReport includes a list of fully-qualified image references.
+type LibpodImagesResolveReport struct {
+	// Fully-qualified image references.
+	Names []string
 }
 
-type LibpodContainersPruneReport struct {
-	ID             string `json:"id"`
-	SpaceReclaimed int64  `json:"space"`
-	PruneError     string `json:"error"`
+type ContainersPruneReport struct {
+	dockerContainer.PruneReport
+}
+
+type ContainersPruneReportLibpod struct {
+	ID             string `json:"Id"`
+	SpaceReclaimed int64  `json:"Size"`
+	// Error which occurred during prune operation (if any).
+	// This field is optional and may be omitted if no error occurred.
+	//
+	// Extensions:
+	// x-omitempty: true
+	// x-nullable: true
+	PruneError string `json:"Err,omitempty"`
+}
+
+type LibpodContainersRmReport struct {
+	ID string `json:"Id"`
+	// Error which occurred during Rm operation (if any).
+	// This field is optional and may be omitted if no error occurred.
+	//
+	// Extensions:
+	// x-omitempty: true
+	// x-nullable: true
+	RmError string `json:"Err,omitempty"`
+}
+
+// UpdateEntities used to wrap the oci resource spec in a swagger model
+// swagger:model
+type UpdateEntities struct {
+	specs.LinuxResources
+	define.UpdateHealthCheckConfig
+	define.UpdateContainerDevicesLimits
+	Env      []string
+	UnsetEnv []string
 }
 
 type Info struct {
-	docker.Info
+	system.Info
 	BuildahVersion     string
 	CPURealtimePeriod  bool
 	CPURealtimeRuntime bool
@@ -61,7 +102,7 @@ type Info struct {
 
 type Container struct {
 	docker.Container
-	docker.ContainerCreateConfig
+	dockerBackend.ContainerCreateConfig
 }
 
 type DiskUsage struct {
@@ -69,11 +110,11 @@ type DiskUsage struct {
 }
 
 type VolumesPruneReport struct {
-	docker.VolumesPruneReport
+	volume.PruneReport
 }
 
 type ImagesPruneReport struct {
-	docker.ImagesPruneReport
+	dockerImage.PruneReport
 }
 
 type BuildCachePruneReport struct {
@@ -81,7 +122,7 @@ type BuildCachePruneReport struct {
 }
 
 type NetworkPruneReport struct {
-	docker.NetworksPruneReport
+	dockerNetwork.PruneReport
 }
 
 type ConfigCreateResponse struct {
@@ -104,17 +145,15 @@ type ContainerWaitOKBody struct {
 }
 
 // CreateContainerConfig used when compatible endpoint creates a container
+// swagger:model
 type CreateContainerConfig struct {
 	Name                   string                         // container name
 	dockerContainer.Config                                // desired container configuration
 	HostConfig             dockerContainer.HostConfig     // host dependent configuration for container
 	NetworkingConfig       dockerNetwork.NetworkingConfig // network configuration for container
-}
-
-// swagger:model IDResponse
-type IDResponse struct {
-	// ID
-	ID string `json:"Id"`
+	EnvMerge               []string                       // preprocess env variables from image before injecting into containers
+	UnsetEnv               []string                       // unset specified default environment variables
+	UnsetEnvAll            bool                           // unset all default environment variables
 }
 
 type ContainerTopOKBody struct {
@@ -123,19 +162,6 @@ type ContainerTopOKBody struct {
 
 type PodTopOKBody struct {
 	dockerContainer.ContainerTopOKBody
-}
-
-// swagger:model PodCreateConfig
-type PodCreateConfig struct {
-	Name         string   `json:"name"`
-	CGroupParent string   `json:"cgroup-parent"`
-	Hostname     string   `json:"hostname"`
-	Infra        bool     `json:"infra"`
-	InfraCommand string   `json:"infra-command"`
-	InfraImage   string   `json:"infra-image"`
-	Labels       []string `json:"labels"`
-	Publish      []string `json:"publish"`
-	Share        string   `json:"share"`
 }
 
 // HistoryResponse provides details on image layers
@@ -149,11 +175,7 @@ type HistoryResponse struct {
 }
 
 type ExecCreateConfig struct {
-	docker.ExecConfig
-}
-
-type ExecCreateResponse struct {
-	docker.IDResponse
+	dockerContainer.ExecOptions
 }
 
 type ExecStartConfig struct {
@@ -163,127 +185,6 @@ type ExecStartConfig struct {
 	Width  uint16 `json:"w"`
 }
 
-func ImageToImageSummary(l *libimage.Image) (*entities.ImageSummary, error) {
-	imageData, err := l.Inspect(context.TODO(), true)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to obtain summary for image %s", l.ID())
-	}
-
-	containers, err := l.Containers()
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to obtain Containers for image %s", l.ID())
-	}
-	containerCount := len(containers)
-
-	is := entities.ImageSummary{
-		ID:           l.ID(),
-		ParentId:     imageData.Parent,
-		RepoTags:     imageData.RepoTags,
-		RepoDigests:  imageData.RepoDigests,
-		Created:      l.Created().Unix(),
-		Size:         imageData.Size,
-		SharedSize:   0,
-		VirtualSize:  imageData.VirtualSize,
-		Labels:       imageData.Labels,
-		Containers:   containerCount,
-		ReadOnly:     l.IsReadOnly(),
-		Dangling:     l.IsDangling(),
-		Names:        l.Names(),
-		Digest:       string(imageData.Digest),
-		ConfigDigest: "", // TODO: libpod/image didn't set it but libimage should
-		History:      imageData.NamesHistory,
-	}
-	return &is, nil
-}
-
-func ImageDataToImageInspect(ctx context.Context, l *libimage.Image) (*ImageInspect, error) {
-	info, err := l.Inspect(context.Background(), true)
-	if err != nil {
-		return nil, err
-	}
-	ports, err := portsToPortSet(info.Config.ExposedPorts)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: many fields in Config still need wiring
-	config := dockerContainer.Config{
-		User:         info.User,
-		ExposedPorts: ports,
-		Env:          info.Config.Env,
-		Cmd:          info.Config.Cmd,
-		Volumes:      info.Config.Volumes,
-		WorkingDir:   info.Config.WorkingDir,
-		Entrypoint:   info.Config.Entrypoint,
-		Labels:       info.Labels,
-		StopSignal:   info.Config.StopSignal,
-	}
-
-	rootfs := docker.RootFS{}
-	if info.RootFS != nil {
-		rootfs.Type = info.RootFS.Type
-		rootfs.Layers = make([]string, 0, len(info.RootFS.Layers))
-		for _, layer := range info.RootFS.Layers {
-			rootfs.Layers = append(rootfs.Layers, string(layer))
-		}
-	}
-
-	graphDriver := docker.GraphDriverData{
-		Name: info.GraphDriver.Name,
-		Data: info.GraphDriver.Data,
-	}
-	// Add in basic ContainerConfig to satisfy docker-compose
-	cc := new(dockerContainer.Config)
-	cc.Hostname = info.ID[0:11] // short ID is the hostname
-	cc.Volumes = info.Config.Volumes
-
-	dockerImageInspect := docker.ImageInspect{
-		Architecture:    info.Architecture,
-		Author:          info.Author,
-		Comment:         info.Comment,
-		Config:          &config,
-		ContainerConfig: cc,
-		Created:         l.Created().Format(time.RFC3339Nano),
-		DockerVersion:   info.Version,
-		GraphDriver:     graphDriver,
-		ID:              "sha256:" + l.ID(),
-		Metadata:        docker.ImageMetadata{},
-		Os:              info.Os,
-		OsVersion:       info.Version,
-		Parent:          info.Parent,
-		RepoDigests:     info.RepoDigests,
-		RepoTags:        info.RepoTags,
-		RootFS:          rootfs,
-		Size:            info.Size,
-		Variant:         "",
-		VirtualSize:     info.VirtualSize,
-	}
-	return &ImageInspect{dockerImageInspect}, nil
-}
-
-// portsToPortSet converts libpods exposed ports to dockers structs
-func portsToPortSet(input map[string]struct{}) (nat.PortSet, error) {
-	ports := make(nat.PortSet)
-	for k := range input {
-		proto, port := nat.SplitProtoPort(k)
-		switch proto {
-		// See the OCI image spec for details:
-		// https://github.com/opencontainers/image-spec/blob/e562b04403929d582d449ae5386ff79dd7961a11/config.md#properties
-		case "tcp", "":
-			p, err := nat.NewPort("tcp", port)
-			if err != nil {
-				return nil, errors.Wrapf(err, "unable to create tcp port from %s", k)
-			}
-			ports[p] = struct{}{}
-		case "udp":
-			p, err := nat.NewPort("udp", port)
-			if err != nil {
-				return nil, errors.Wrapf(err, "unable to create tcp port from %s", k)
-			}
-			ports[p] = struct{}{}
-		default:
-			return nil, errors.Errorf("invalid port proto %q in %q", proto, k)
-		}
-	}
-	return ports, nil
+type ExecRemoveConfig struct {
+	Force bool `json:"Force"`
 }

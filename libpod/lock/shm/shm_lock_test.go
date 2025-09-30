@@ -1,9 +1,11 @@
-// +build linux
+//go:build linux || freebsd
 
 package shm
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"runtime"
 	"testing"
@@ -27,8 +29,11 @@ const lockPath = "/libpod_test"
 
 // We need a test main to ensure that the SHM is created before the tests run
 func TestMain(m *testing.M) {
-	// Remove prior /dev/shm/libpod_test
-	os.RemoveAll("/dev/shm" + lockPath)
+	// Remove prior /libpod_test
+	if err := unlinkSHMLock(lockPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "Error cleaning SHM for tests: %v\n", err)
+		os.Exit(-1)
+	}
 	shmLock, err := CreateSHMLock(lockPath, numLocks)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating SHM for tests: %v\n", err)
@@ -75,8 +80,10 @@ func runLockTest(t *testing.T, testFunc func(*testing.T, *SHMLocks)) {
 
 // Test that creating an SHM with a bad size rounds up to a good size
 func TestCreateNewSHMBadSizeRoundsUp(t *testing.T) {
-	// Remove prior /dev/shm/test1
-	os.RemoveAll("/dev/shm/test1")
+	// Remove prior /test1
+	if err := unlinkSHMLock("/test1"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Error cleaning SHM for tests: %v\n", err)
+	}
 	// Odd number, not a power of 2, should never be a word size on a system
 	lock, err := CreateSHMLock("/test1", 7)
 	assert.NoError(t, err)
@@ -159,8 +166,7 @@ func TestAllocateTwoLocksGetsDifferentLocks(t *testing.T) {
 func TestAllocateAllLocksSucceeds(t *testing.T) {
 	runLockTest(t, func(t *testing.T, locks *SHMLocks) {
 		sems := make(map[uint32]bool)
-		var i uint32
-		for i = 0; i < numLocks; i++ {
+		for range numLocks {
 			sem, err := locks.AllocateSemaphore()
 			assert.NoError(t, err)
 
@@ -177,8 +183,7 @@ func TestAllocateAllLocksSucceeds(t *testing.T) {
 func TestAllocateTooManyLocksFails(t *testing.T) {
 	runLockTest(t, func(t *testing.T, locks *SHMLocks) {
 		// Allocate all locks
-		var i uint32
-		for i = 0; i < numLocks; i++ {
+		for range numLocks {
 			_, err := locks.AllocateSemaphore()
 			assert.NoError(t, err)
 		}
@@ -193,8 +198,7 @@ func TestAllocateTooManyLocksFails(t *testing.T) {
 func TestAllocateDeallocateCycle(t *testing.T) {
 	runLockTest(t, func(t *testing.T, locks *SHMLocks) {
 		// Allocate all locks
-		var i uint32
-		for i = 0; i < numLocks; i++ {
+		for range numLocks {
 			_, err := locks.AllocateSemaphore()
 			assert.NoError(t, err)
 		}
@@ -202,8 +206,7 @@ func TestAllocateDeallocateCycle(t *testing.T) {
 		// Now loop through again, deallocating and reallocating.
 		// Each time we free 1 semaphore, allocate again, and make sure
 		// we get the same semaphore back.
-		var j uint32
-		for j = 0; j < numLocks; j++ {
+		for j := range numLocks {
 			err := locks.DeallocateSemaphore(j)
 			assert.NoError(t, err)
 

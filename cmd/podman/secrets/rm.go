@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/utils"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
@@ -29,6 +29,7 @@ func init() {
 	})
 	flags := rmCmd.Flags()
 	flags.BoolVarP(&rmOptions.All, "all", "a", false, "Remove all secrets")
+	flags.BoolVarP(&rmOptions.Ignore, "ignore", "i", false, "Ignore errors when a specified secret is missing")
 }
 
 var (

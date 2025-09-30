@@ -1,9 +1,9 @@
-// +build !linux
+//go:build !linux && !freebsd
 
 package chrootuser
 
 import (
-	"github.com/pkg/errors"
+	"errors"
 )
 
 func lookupUserInContainer(rootdir, username string) (uint64, uint64, error) {

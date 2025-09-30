@@ -7,6 +7,7 @@
 #
 
 source "$(dirname $0)"/helpers.bash
+source "$(dirname $0)"/helpers.network.bash
 
 die() {
     echo "$(basename $0): $*" >&2
@@ -16,6 +17,13 @@ die() {
 # Iterator and return code; updated in check_result()
 testnum=0
 rc=0
+
+# Possibly used by the code we're testing
+PODMAN_TMPDIR=$(mktemp -d --tmpdir=${TMPDIR:-/tmp} podman_helper_tests.XXXXXX)
+trap 'rm -rf $PODMAN_TMPDIR' 0
+
+# Used by random_free_port.
+PORT_LOCK_DIR=$PODMAN_TMPDIR/reserved-ports
 
 ###############################################################################
 # BEGIN test the parse_table helper
@@ -213,8 +221,226 @@ declare -a lines=(
 )
 check_same_dev "zero-line output"
 
-
 # END   remove_same_dev_warning
+###############################################################################
+# BEGIN random_free_port
+
+# Assumes that 16700 is open
+found=$(random_free_port 16700-16700)
+
+check_result "$found" "16700" "random_free_port"
+
+# END   random_free_port
+###############################################################################
+# BEGIN ipv6_to_procfs
+
+# Table of IPv6 short forms and their procfs equivalents. For readability,
+# spaces separate each 16-bit word. Spaces are removed when testing.
+table="
+2b06::1     | 2B06 0000 0000 0000 0000 0000 0000 0001
+::1         | 0000 0000 0000 0000 0000 0000 0000 0001
+0::1        | 0000 0000 0000 0000 0000 0000 0000 0001
+"
+
+while read shortform expect; do
+    actual=$(ipv6_to_procfs $shortform)
+    check_result "$actual" "${expect// }" "ipv6_to_procfs $shortform"
+done < <(parse_table "$table")
+
+# END   ipv6_to_procfs
+###############################################################################
+# BEGIN subnet_in_use  ...  because that's complicated
+
+# Override ip command
+function ip() {
+    echo "default foo"
+    echo "192.168.0.0/16"
+    echo "172.17.2.3/30"
+    echo "172.128.0.0/9"
+}
+
+# x.y.z | result (1 = in use, 0 = not in use - opposite of exit code)
+table="
+172 |   0 |   0  | 0
+172 |   0 | 255  | 0
+172 |   1 |   1  | 0
+172 |   1 |   2  | 0
+172 |   1 |   3  | 0
+172 |  17 |   1  | 0
+172 |  17 |   2  | 1
+172 |  17 |   3  | 0
+172 | 127 |   0  | 0
+172 | 128 |   0  | 1
+172 | 255 |   2  | 1
+192 | 168 |   1  | 1
+"
+
+while read n1 n2 n3 expect; do
+    subnet_in_use $n1 $n2 $n3
+    actual=$?
+    check_result "$((1 - $actual))" "$expect" "subnet_in_use $n1.$n2.$n3"
+done < <(parse_table "$table")
+
+unset -f ip
+
+# END   subnet_in_use
+###############################################################################
+# BEGIN check_assert
+#
+# This is way, way more complicated than it should be. The purpose is
+# to generate readable error messages should any of the tests ever fail.
+#
+
+# Args: the last one is "" (expect to pass) or non-"" (expect that as msg).
+# All other args are what we feed to assert()
+function check_assert() {
+    local argv=("$@")
+    testnum=$(expr $testnum + 1)
+
+    # Final arg: "" to expect pass, anything else is expected error message
+    local expect="${argv[-1]}"
+    unset 'argv[-1]'
+
+    # Descriptive test name. If multiline, use sed to make the rest '[...]'
+    local testname="assert ${argv[*]}"
+    testname="$(sed -z -e 's/[\r\n].\+/ [...]/' <<<"$testname")"
+
+    # HERE WE GO. This is the actual test.
+    actual=$(assert "${argv[@]}" 2>&1)
+    status=$?
+
+    # Now compare actual to expect.
+    if [[ -z "$expect" ]]; then
+        # expect: pass
+        if [[ $status -eq 0 ]]; then
+            # got: pass
+            echo "ok $testnum $testname"
+        else
+            # got: fail
+            echo "not ok $testnum $testname"
+            echo "# expected success; got:"
+            local -a actual_split
+            IFS=$'\n' read -rd '' -a actual_split <<<"$actual" || true
+            if [[ "${actual_split[0]}" =~ 'vvvvv' ]]; then
+                unset 'actual_split[0]'
+                unset 'actual_split[1]'
+                unset 'actual_split[-1]'
+                actual_split=("${actual_split[@]}")
+            fi
+            for line in "${actual_split[@]}"; do
+                echo "#     $line"
+            done
+            rc=1
+        fi
+    else
+        # expect: fail
+        if [[ $status -eq 0 ]]; then
+            # got: pass
+            echo "not ok $testnum $testname"
+            echo "# expected it to fail, but it passed"
+            rc=1
+        else
+            # Expected failure, got failure. But is it the desired failure?
+
+            # Split what we got into lines, and remove the top/bottom borders
+            local -a actual_split
+            IFS=$'\n' read -rd '' -a actual_split <<<"$actual" || true
+            if [[ "${actual_split[0]}" =~ 'vvvvv' ]]; then
+                unset 'actual_split[0]'
+                unset 'actual_split[1]'
+                unset 'actual_split[-1]'
+                actual_split=("${actual_split[@]}")
+            fi
+
+            # Split the expect string into lines, and remove first if empty
+            local -a expect_split
+            IFS=$'\n' read -rd '' -a expect_split <<<"$expect" || true
+            if [[ -z "${expect_split[0]}" ]]; then
+                unset 'expect_split[0]'
+                expect_split=("${expect_split[@]}")
+            fi
+
+            if [[ "${actual_split[*]}" = "${expect_split[*]}" ]]; then
+                # Yay.
+                echo "ok $testnum $testname"
+            else
+                # Nope. Mismatch between actual and expected output
+                echo "not ok $testnum $testname"
+                rc=1
+
+                # Ugh, this is complicated. Try to produce a useful err msg.
+                local n_e=${#expect_split[*]}
+                local n_a=${#actual_split[*]}
+                local n_max=${n_e}
+                if [[ $n_max -lt $n_a ]]; then
+                    n_max=${n_a}
+                fi
+                printf "#    %-35s | actual\n" "expect"
+                printf "#    ----------------------------------- | ------\n"
+                for i in $(seq 0 $((${n_max}-1))); do
+                    local e="${expect_split[$i]}"
+                    local a="${actual_split[$i]}"
+                    local same=' '
+                    local eq='='
+                    if [[ "$e" != "$a" ]]; then
+                        same='!'
+                        eq='|'
+                    fi
+                    printf "#  %s %-35s %s %s\n" "$same" "$e" "$eq" "$a"
+                done
+            fi
+        fi
+    fi
+}
+
+# Positive tests
+check_assert "a"    =  "a"     ""
+check_assert "abc"  =~ "a"     ""
+check_assert "abc"  =~ "b"     ""
+check_assert "abc"  =~ "c"     ""
+check_assert "abc"  =~ "a.*c"  ""
+check_assert "a"   !=  "b"     ""
+
+# Simple Failure tests
+check_assert "a" = "b" "
+#| expected: = b
+#|   actual:   a"
+
+# This is the one that triggered #17509
+expect="abcd efg
+hijk lmnop"
+actual="abcd efg
+
+hijk lmnop"
+check_assert "$actual" = "$expect" "
+#| expected: = abcd efg
+#|         >   hijk lmnop
+#|   actual:   abcd efg
+#|         >   ''
+#|         >   hijk lmnop"
+
+# Undesired carriage returns
+cr=$'\r'
+expect="this is line 1
+this is line 2"
+actual="this is line 1$cr
+this is line 2$cr"
+check_assert "$actual" = "$expect" "
+#| expected: = this is line 1
+#|         >   this is line 2
+#|   actual:   \$'this is line 1\r'
+#|         >   \$'this is line 2\r'"
+
+# Anchored expressions; the 2nd and 3rd are 15 and 17 characters, not 16
+check_assert "0123456789abcdef"  =~ "^[0-9a-f]{16}\$" ""
+check_assert "0123456789abcde"   =~ "^[0-9a-f]{16}\$" "
+#| expected: =~ \^\[0-9a-f\]\{16\}\\$
+#|   actual:    0123456789abcde"
+check_assert "0123456789abcdeff"  =~ "^[0-9a-f]{16}\$" "
+#| expected: =~ \^\[0-9a-f\]\{16\}\\$
+#|   actual:    0123456789abcdeff"
+
+# END   check_assert
 ###############################################################################
 
 exit $rc

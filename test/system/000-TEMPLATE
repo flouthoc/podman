@@ -10,7 +10,23 @@ load helpers
 @test "podman subcmd - description of this particular test" {
     args="some sort of argument list"
     run_podman subcmd $args
-    is "$output"   "what we expect"   "output from 'podman subcmd $args'"
+    assert "$output" == "what we expect"   "output from 'podman subcmd $args'"
+
+    # safename() provides a lower-case string with both the BATS test number
+    # and a pseudorandom element. Its use is strongly encouraged for container
+    # names, volumes, networks, images, everything, because the test number
+    # makes it possible to find leaked elements.
+    cname="c-$(safename)"
+
+    # Run "top" in a detached container with a safe name
+    run_podman run -d --name $cname --this-option --that $IMAGE top
+
+    # A number ("17") as the first run_podman arg means "expect this exit code".
+    # By default, run_podman expects success, and will barf on nonzero status.
+    run_podman 17 run --this-option --that $IMAGE exit 17
+
+    # Give a hoot, don't pollute
+    run_podman rm -f -t0 $cname
 }
 
 # vim: filetype=sh
@@ -66,7 +82,7 @@ function teardown() {
     # FIXME: example of dprint. This will trigger if PODMAN_TEST_DEBUG=FOO
     # FIXME:  ...or anything that matches the name assigned in the @test line.
     dprint "podman logs $cid -> '$output'"
-    is "$output" "what are we expecting?" "description of this check"
+    assert "$output" == "what are we expecting?" "description of this check"
 
     # Clean up
     run_podman rm $cid
@@ -90,7 +106,7 @@ size      | -\\\?[0-9]\\\+
     run_podman history --format json $IMAGE
 
     # FIXME: parse_table is what does all the work, giving us test cases.
-    parse_table "$tests" | while read field expect; do
+    while read field expect; do
         # FIXME: this shows a drawback of BATS and bash: we can't include '|'
         # FIXME: in the table, but we need to because some images don't
         # FIXME: have a CID. So, yeah, this is ugly -- but rare.
@@ -104,11 +120,58 @@ size      | -\\\?[0-9]\\\+
             # FIXME: please be sure to note the third field!
             # FIXME: that's the test name. Make it something useful! Include
             # FIXME: loop variables whenever possible. Don't just say "my test"
-            is "$actual"    "$expect\$"    "jq .[$i].$field"
+            assert "$actual" =~ "$expect\$"    "jq .[$i].$field"
             i=$(expr $i + 1)
         done
-    done
+    done < <(parse_table "$tests")
 }
 
+# Whenever possible, please add the ci:parallel tag to new tests,
+# not only for speed but for stress testing.
+#
+# Some test files have '# bats file_tags=ci:parallel' at the top.
+#                              ^^^^---- instead of test_tags on each test
+# This indicates that ALL tests in the file run parallel, and if
+# you add new tests, you need to guarantee that your new test
+# will also run parallel-safe.
+#
+# Below is an example of what NOT to do when enabling parallel tests.
+#
+# bats test_tags=ci:parallel
+@test "this test is completely broken in parallel" {
+    # Never use "--name HARDCODED". Define 'cname=c-$(safename)' instead:
+    #    cname="c-$(safename)"
+    #    run_podman --name $cname ...
+    # Not only does that guarantee uniqueness, it also gives the test number
+    # in the name, so if there's a leak (at end of tests) it will be possible
+    # to identify the culprit.
+    run_podman --name mycontainer $IMAGE top
+
+    # Same thing for build and -t:
+    #    imgname="i-$(safename)"
+    #    run_podman build -t $imgname ...
+    # Ed's convention is "c-$(safename)" for containers, "i-" images,
+    # "n-" namespaces, "p-" pods, "v-" volumes, "z-" zebras.
+    # When there are multiple objects needed, it is slightly easier
+    # to differentiate in front rather than at the tail:
+    #    yes: c1="ctr1-$(safename)"
+    #         c2="ctr2-$(safename)"
+    #    no:  c1="ctr-$(safename)-1"
+    run_podman build -t myimage ...
+
+    # Never assume exact output from podman ps! Many other containers may be running.
+    run_podman ps
+    assert "$output" = "mycontainer"
+
+    # Never use "-l". It is meaningless when other processes are running.
+    run_podman container inspect -l
+
+    # "userns=auto" can NEVER be parallelized: multiple jobs running
+    # at once will cause "not enough unused IDs in user namespace"
+    run_podman run --userns=auto ....
+
+    # Never 'rm -a'!!! OMG like seriously just don't.
+    run_podman rm -f -a
+}
 
 # vim: filetype=sh

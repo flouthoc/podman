@@ -1,17 +1,28 @@
 package manifest
 
 import (
-	"context"
+	"errors"
 	"fmt"
+	"strings"
 
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/types"
 )
 
+// manifestCreateOptsWrapper wraps entities.ManifestCreateOptions and prevents leaking
+// CLI-only fields into the API types.
+type manifestCreateOptsWrapper struct {
+	entities.ManifestCreateOptions
+	annotations            []string // CLI only
+	tlsVerifyCLI, insecure bool     // CLI only
+}
+
 var (
-	manifestCreateOpts = entities.ManifestCreateOptions{}
+	manifestCreateOpts = manifestCreateOptsWrapper{}
 	createCmd          = &cobra.Command{
 		Use:               "create [options] LIST [IMAGE...]",
 		Short:             "Create manifest list or image index",
@@ -33,10 +44,40 @@ func init() {
 	})
 	flags := createCmd.Flags()
 	flags.BoolVar(&manifestCreateOpts.All, "all", false, "add all of the lists' images if the images to add are lists")
+	flags.BoolVarP(&manifestCreateOpts.Amend, "amend", "a", false, "modify an existing list if one with the desired name already exists")
+	flags.BoolVar(&manifestCreateOpts.insecure, "insecure", false, "neither require HTTPS nor verify certificates when accessing the registry")
+	flags.StringArrayVar(&manifestCreateOpts.annotations, "annotation", nil, "set annotations on the new list")
+	_ = createCmd.RegisterFlagCompletionFunc("annotation", completion.AutocompleteNone)
+	_ = flags.MarkHidden("insecure")
+	flags.BoolVar(&manifestCreateOpts.tlsVerifyCLI, "tls-verify", true, "require HTTPS and verify certificates when accessing the registry")
 }
 
 func create(cmd *cobra.Command, args []string) error {
-	imageID, err := registry.ImageEngine().ManifestCreate(context.Background(), args[:1], args[1:], manifestCreateOpts)
+	// TLS verification in c/image is controlled via a `types.OptionalBool`
+	// which allows for distinguishing among set-true, set-false, unspecified
+	// which is important to implement a sane way of dealing with defaults of
+	// boolean CLI flags.
+	if cmd.Flags().Changed("tls-verify") {
+		manifestCreateOpts.SkipTLSVerify = types.NewOptionalBool(!manifestCreateOpts.tlsVerifyCLI)
+	}
+	if cmd.Flags().Changed("insecure") {
+		if manifestCreateOpts.SkipTLSVerify != types.OptionalBoolUndefined {
+			return errors.New("--insecure may not be used with --tls-verify")
+		}
+		manifestCreateOpts.SkipTLSVerify = types.NewOptionalBool(manifestCreateOpts.insecure)
+	}
+	for _, annotation := range manifestCreateOpts.annotations {
+		k, v, parsed := strings.Cut(annotation, "=")
+		if !parsed {
+			return fmt.Errorf("expected --annotation %q to be in key=value format", annotation)
+		}
+		if manifestCreateOpts.Annotations == nil {
+			manifestCreateOpts.Annotations = make(map[string]string)
+		}
+		manifestCreateOpts.Annotations[k] = v
+	}
+
+	imageID, err := registry.ImageEngine().ManifestCreate(registry.Context(), args[0], args[1:], manifestCreateOpts.ManifestCreateOptions)
 	if err != nil {
 		return err
 	}

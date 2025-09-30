@@ -1,9 +1,11 @@
+//go:build !remote
+
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/api/handlers/compat"
+	"github.com/containers/podman/v5/pkg/api/handlers/compat"
 	"github.com/gorilla/mux"
 )
 
@@ -59,7 +61,7 @@ func (s *APIServer) registerPingHandlers(r *mux.Router) error {
 	//               Available if service is backed by Podman, therefore may be used to
 	//               determine if talking to Podman engine or another engine
 	//     500:
-	//       $ref: "#/responses/InternalError"
+	//       $ref: "#/responses/internalError"
 	r.Handle("/libpod/_ping", s.APIHandler(compat.Ping)).Methods(http.MethodGet, http.MethodHead)
 	r.Handle(VersionedPath("/libpod/_ping"), s.APIHandler(compat.Ping)).Methods(http.MethodGet, http.MethodHead)
 	return nil

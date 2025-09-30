@@ -3,16 +3,17 @@ package connection
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/system"
-	"github.com/containers/podman/v3/cmd/podman/validate"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/system"
+	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -23,95 +24,131 @@ var (
 		Short:   "List destination for the Podman service(s)",
 		Long:    `List destination information for the Podman service(s) in podman configuration`,
 		Example: `podman system connection list
+	# Format as table without TLS info
   podman system connection ls
-  podman system connection ls --format=json`,
+	# Format as table with TLS info
+  podman system connection ls --format=tls
+	# Format as JSON
+  podman system connection ls --format=json
+	# Format as custom go template
+  podman system connection ls --format='{{range .}}{{.Name}}{{ "\n" }}{{ end }}'`,
 		ValidArgsFunction: completion.AutocompleteNone,
 		RunE:              list,
 		TraverseChildren:  false,
 	}
+	inspectCmd = &cobra.Command{
+		Use:               "inspect [options] [CONTEXT] [CONTEXT...]",
+		Short:             "Inspect destination for a Podman service(s)",
+		ValidArgsFunction: completion.AutocompleteNone,
+		RunE:              inspect,
+	}
 )
 
 func init() {
+	initFlags := func(cmd *cobra.Command) {
+		cmd.Flags().StringP("format", "f", "", "Custom Go template for printing connections")
+		_ = cmd.RegisterFlagCompletionFunc("format", common.AutocompleteFormat(&config.Connection{}))
+		cmd.Flags().BoolP("quiet", "q", false, "Custom Go template for printing connections")
+	}
+
+	registry.Commands = append(registry.Commands, registry.CliCommand{
+		Command: listCmd,
+		Parent:  system.ContextCmd,
+	})
 	registry.Commands = append(registry.Commands, registry.CliCommand{
 		Command: listCmd,
 		Parent:  system.ConnectionCmd,
 	})
+	initFlags(listCmd)
 
-	listCmd.Flags().String("format", "", "Custom Go template for printing connections")
-	_ = listCmd.RegisterFlagCompletionFunc("format", common.AutocompleteFormat(namedDestination{}))
-}
-
-type namedDestination struct {
-	Name string
-	config.Destination
+	registry.Commands = append(registry.Commands, registry.CliCommand{
+		Command: inspectCmd,
+		Parent:  system.ContextCmd,
+	})
+	initFlags(inspectCmd)
 }
 
 func list(cmd *cobra.Command, _ []string) error {
-	cfg, err := config.ReadCustomConfig()
+	return inspect(cmd, nil)
+}
+
+func inspect(cmd *cobra.Command, args []string) error {
+	format := cmd.Flag("format").Value.String()
+	if format == "" && args != nil {
+		format = "json"
+	}
+
+	quiet, err := cmd.Flags().GetBool("quiet")
 	if err != nil {
 		return err
 	}
 
-	if len(cfg.Engine.ServiceDestinations) == 0 {
-		return nil
+	cons, err := registry.PodmanConfig().ContainersConfDefaultsRO.GetAllConnections()
+	if err != nil {
+		return err
+	}
+	rows := make([]config.Connection, 0, len(cons))
+	for _, con := range cons {
+		if args != nil && !slices.Contains(args, con.Name) {
+			continue
+		}
+
+		if quiet {
+			fmt.Println(con.Name)
+			continue
+		}
+
+		rows = append(rows, con)
 	}
 
-	hdrs := []map[string]string{{
-		"Identity": "Identity",
-		"Name":     "Name",
-		"URI":      "URI",
-	}}
-
-	rows := make([]namedDestination, 0)
-	for k, v := range cfg.Engine.ServiceDestinations {
-		if k == cfg.Engine.ActiveService {
-			k += "*"
-		}
-
-		r := namedDestination{
-			Name: k,
-			Destination: config.Destination{
-				Identity: v.Identity,
-				URI:      v.URI,
-			},
-		}
-		rows = append(rows, r)
+	if quiet {
+		return nil
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
 		return rows[i].Name < rows[j].Name
 	})
 
-	format := "{{.Name}}\t{{.Identity}}\t{{.URI}}\n"
-	switch {
-	case report.IsJSON(cmd.Flag("format").Value.String()):
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+
+	if report.IsJSON(format) {
 		buf, err := registry.JSONLibrary().MarshalIndent(rows, "", "    ")
 		if err == nil {
 			fmt.Println(string(buf))
 		}
 		return err
+	}
+
+	switch format {
+	case "tls":
+		rpt, err = rpt.Parse(report.OriginPodman,
+			"{{range .}}{{.Name}}\t{{.URI}}\t{{.Identity}}\t{{.TLSCA}}\t{{.TLSCert}}\t{{.TLSKey}}\t{{.Default}}\t{{.ReadWrite}}\n{{end -}}")
+	case "":
+		rpt, err = rpt.Parse(report.OriginPodman,
+			"{{range .}}{{.Name}}\t{{.URI}}\t{{.Identity}}\t{{.Default}}\t{{.ReadWrite}}\n{{end -}}")
 	default:
-		if cmd.Flag("format").Changed {
-			format = cmd.Flag("format").Value.String()
-			format = report.NormalizeFormat(format)
+		rpt, err = rpt.Parse(report.OriginUser, format)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if rpt.RenderHeaders {
+		err = rpt.Execute([]map[string]string{{
+			"Default":   "Default",
+			"Identity":  "Identity",
+			"TLSCA":     "TLSCA",
+			"TLSCert":   "TLSCert",
+			"TLSKey":    "TLSKey",
+			"Name":      "Name",
+			"URI":       "URI",
+			"ReadWrite": "ReadWrite",
+		}})
+		if err != nil {
+			return err
 		}
 	}
-	format = report.EnforceRange(format)
-
-	tmpl, err := report.NewTemplate("list").Parse(format)
-	if err != nil {
-		return err
-	}
-
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
-	isTable := report.HasTable(cmd.Flag("format").Value.String())
-	if !cmd.Flag("format").Changed || isTable {
-		_ = tmpl.Execute(w, hdrs)
-	}
-	return tmpl.Execute(w, rows)
+	return rpt.Execute(rows)
 }

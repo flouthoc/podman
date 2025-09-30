@@ -1,29 +1,30 @@
+//go:build !remote
+
 package compat
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/pkg/api/handlers"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/infra/abi"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/docker/docker/api/types"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+	"github.com/containers/podman/v5/pkg/util"
+	dockerImage "github.com/docker/docker/api/types/image"
 )
 
 func PruneImages(w http.ResponseWriter, r *http.Request) {
-	var (
-		filters []string
-	)
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+	var filters []string
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 
 	filterMap, err := util.PrepareFilters(r)
 	if err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusInternalServerError, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
@@ -42,7 +43,7 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idr := make([]types.ImageDeleteResponseItem, len(imagePruneReports))
+	idr := make([]dockerImage.DeleteResponse, 0, len(imagePruneReports))
 	var reclaimedSpace uint64
 	var errorMsg bytes.Buffer
 	for _, p := range imagePruneReports {
@@ -54,10 +55,10 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		idr = append(idr, types.ImageDeleteResponseItem{
+		idr = append(idr, dockerImage.DeleteResponse{
 			Deleted: p.Id,
 		})
-		reclaimedSpace = reclaimedSpace + p.Size
+		reclaimedSpace += p.Size
 	}
 	if errorMsg.Len() > 0 {
 		utils.InternalServerError(w, errors.New(errorMsg.String()))
@@ -65,7 +66,7 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := handlers.ImagesPruneReport{
-		ImagesPruneReport: types.ImagesPruneReport{
+		PruneReport: dockerImage.PruneReport{
 			ImagesDeleted:  idr,
 			SpaceReclaimed: reclaimedSpace,
 		},

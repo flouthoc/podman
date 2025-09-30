@@ -3,16 +3,16 @@ package containers
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/utils"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/rootless"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -22,21 +22,26 @@ var (
    Restores a container from a checkpoint. The container name or ID can be used.
 `
 	restoreCommand = &cobra.Command{
-		Use:   "restore [options] CONTAINER [CONTAINER...]",
-		Short: "Restores one or more containers from a checkpoint",
+		Use:   "restore [options] CONTAINER|IMAGE [CONTAINER|IMAGE...]",
+		Short: "Restore one or more containers from a checkpoint",
 		Long:  restoreDescription,
 		RunE:  restore,
 		Args: func(cmd *cobra.Command, args []string) error {
-			return validate.CheckAllLatestAndCIDFile(cmd, args, true, false)
+			return validate.CheckAllLatestAndIDFile(cmd, args, true, "")
 		},
-		ValidArgsFunction: common.AutocompleteContainers,
+		ValidArgsFunction: common.AutocompleteContainersAndImages,
 		Example: `podman container restore ctrID
-  podman container restore --latest
+  podman container restore imageID
   podman container restore --all`,
 	}
 )
 
 var restoreOptions entities.RestoreOptions
+
+type restoreStatistics struct {
+	PodmanDuration      int64                     `json:"podman_restore_duration"`
+	ContainerStatistics []*entities.RestoreReport `json:"container_statistics"`
+}
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -47,13 +52,15 @@ func init() {
 	flags.BoolVarP(&restoreOptions.All, "all", "a", false, "Restore all checkpointed containers")
 	flags.BoolVarP(&restoreOptions.Keep, "keep", "k", false, "Keep all temporary checkpoint files")
 	flags.BoolVar(&restoreOptions.TCPEstablished, "tcp-established", false, "Restore a container with established TCP connections")
+	flags.BoolVar(&restoreOptions.TCPClose, "tcp-close", false, "Restore a container and close all TCP connections")
+	flags.BoolVar(&restoreOptions.FileLocks, "file-locks", false, "Restore a container with file locks")
 
 	importFlagName := "import"
 	flags.StringVarP(&restoreOptions.Import, importFlagName, "i", "", "Restore from exported checkpoint archive (tar.gz)")
 	_ = restoreCommand.RegisterFlagCompletionFunc(importFlagName, completion.AutocompleteDefault)
 
 	nameFlagName := "name"
-	flags.StringVarP(&restoreOptions.Name, nameFlagName, "n", "", "Specify new name for container restored from exported checkpoint (only works with --import)")
+	flags.StringVarP(&restoreOptions.Name, nameFlagName, "n", "", "Specify new name for container restored from exported checkpoint (only works with image or --import)")
 	_ = restoreCommand.RegisterFlagCompletionFunc(nameFlagName, completion.AutocompleteNone)
 
 	importPreviousFlagName := "import-previous"
@@ -71,66 +78,125 @@ func init() {
 	)
 	_ = restoreCommand.RegisterFlagCompletionFunc("publish", completion.AutocompleteNone)
 
+	flags.StringVar(&restoreOptions.Pod, "pod", "", "Restore container into existing Pod (only works with image or --import)")
+	_ = restoreCommand.RegisterFlagCompletionFunc("pod", common.AutocompletePodsRunning)
+
+	flags.BoolVar(
+		&restoreOptions.PrintStats,
+		"print-stats",
+		false,
+		"Display restore statistics",
+	)
+
 	validate.AddLatestFlag(restoreCommand, &restoreOptions.Latest)
 }
 
 func restore(cmd *cobra.Command, args []string) error {
-	var errs utils.OutputErrors
+	var (
+		e    error
+		errs utils.OutputErrors
+	)
+	args = utils.RemoveSlash(args)
+
+	podmanStart := time.Now()
 	if rootless.IsRootless() {
-		return errors.New("restoring a container requires root")
+		return fmt.Errorf("restoring a container requires root")
 	}
-	if restoreOptions.Import == "" && restoreOptions.ImportPrevious != "" {
-		return errors.Errorf("--import-previous can only be used with --import")
+
+	// Check if the container exists (#15055)
+	exists := &entities.BoolReport{Value: false}
+	for _, ctr := range args {
+		exists, e = registry.ContainerEngine().ContainerExists(registry.Context(), ctr, entities.ContainerExistsOptions{})
+		if e != nil {
+			return e
+		}
+		if exists.Value {
+			break
+		}
 	}
-	if restoreOptions.Import == "" && restoreOptions.IgnoreRootFS {
-		return errors.Errorf("--ignore-rootfs can only be used with --import")
+
+	if !exists.Value {
+		// Find out if this is an image
+		restoreOptions.CheckpointImage, e = utils.IsCheckpointImage(context.Background(), args)
+		if e != nil {
+			return e
+		}
 	}
-	if restoreOptions.Import == "" && restoreOptions.IgnoreVolumes {
-		return errors.Errorf("--ignore-volumes can only be used with --import")
+
+	notImport := !restoreOptions.CheckpointImage && restoreOptions.Import == ""
+
+	if notImport && restoreOptions.ImportPrevious != "" {
+		return fmt.Errorf("--import-previous can only be used with image or --import")
 	}
-	if restoreOptions.Import == "" && restoreOptions.Name != "" {
-		return errors.Errorf("--name can only be used with --import")
+	if notImport && restoreOptions.IgnoreRootFS {
+		return fmt.Errorf("--ignore-rootfs can only be used with image or --import")
+	}
+	if notImport && restoreOptions.IgnoreVolumes {
+		return fmt.Errorf("--ignore-volumes can only be used with image or --import")
+	}
+	if notImport && restoreOptions.Name != "" {
+		return fmt.Errorf("--name can only be used with image or --import")
+	}
+	if notImport && restoreOptions.Pod != "" {
+		return fmt.Errorf("--pod can only be used with image or --import")
 	}
 	if restoreOptions.Name != "" && restoreOptions.TCPEstablished {
-		return errors.Errorf("--tcp-established cannot be used with --name")
+		return fmt.Errorf("--tcp-established cannot be used with --name")
 	}
 
 	inputPorts, err := cmd.Flags().GetStringSlice("publish")
 	if err != nil {
 		return err
 	}
-	if len(inputPorts) > 0 {
-		restoreOptions.PublishPorts, err = common.CreatePortBindings(inputPorts)
-		if err != nil {
-			return err
-		}
-	}
+	restoreOptions.PublishPorts = inputPorts
 
 	argLen := len(args)
 	if restoreOptions.Import != "" {
 		if restoreOptions.All || restoreOptions.Latest {
-			return errors.Errorf("Cannot use --import with --all or --latest")
+			return fmt.Errorf("cannot use --import with --all or --latest")
 		}
 		if argLen > 0 {
-			return errors.Errorf("Cannot use --import with positional arguments")
+			return fmt.Errorf("cannot use --import with positional arguments")
 		}
 	}
 	if (restoreOptions.All || restoreOptions.Latest) && argLen > 0 {
-		return errors.Errorf("--all or --latest and containers cannot be used together")
+		return fmt.Errorf("--all or --latest and containers cannot be used together")
 	}
 	if argLen < 1 && !restoreOptions.All && !restoreOptions.Latest && restoreOptions.Import == "" {
-		return errors.Errorf("you must provide at least one name or id")
+		return fmt.Errorf("you must provide at least one name or id")
+	}
+	if argLen > 1 && restoreOptions.Name != "" {
+		return fmt.Errorf("--name can only be used with one checkpoint image")
 	}
 	responses, err := registry.ContainerEngine().ContainerRestore(context.Background(), args, restoreOptions)
 	if err != nil {
 		return err
 	}
+	podmanFinished := time.Now()
+
+	var statistics restoreStatistics
+
 	for _, r := range responses {
-		if r.Err == nil {
-			fmt.Println(r.Id)
-		} else {
+		switch {
+		case r.Err != nil:
 			errs = append(errs, r.Err)
+		case restoreOptions.PrintStats:
+			statistics.ContainerStatistics = append(statistics.ContainerStatistics, r)
+		case r.RawInput != "":
+			fmt.Println(r.RawInput)
+		default:
+			fmt.Println(r.Id)
 		}
 	}
+
+	if restoreOptions.PrintStats {
+		statistics.PodmanDuration = podmanFinished.Sub(podmanStart).Microseconds()
+		j, err := json.MarshalIndent(statistics, "", "    ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(j))
+	}
+
 	return errs.PrintErrors()
 }

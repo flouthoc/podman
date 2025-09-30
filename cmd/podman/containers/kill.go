@@ -2,19 +2,19 @@ package containers
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/utils"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/signal"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/signal"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -25,7 +25,7 @@ var (
 		Long:  killDescription,
 		RunE:  kill,
 		Args: func(cmd *cobra.Command, args []string) error {
-			return validate.CheckAllLatestAndCIDFile(cmd, args, false, true)
+			return validate.CheckAllLatestAndIDFile(cmd, args, false, "cidfile")
 		},
 		ValidArgsFunction: common.AutocompleteContainersRunning,
 		Example: `podman kill mywebserver
@@ -35,7 +35,7 @@ var (
 
 	containerKillCommand = &cobra.Command{
 		Args: func(cmd *cobra.Command, args []string) error {
-			return validate.CheckAllLatestAndCIDFile(cmd, args, false, true)
+			return validate.CheckAllLatestAndIDFile(cmd, args, false, "cidfile")
 		},
 		Use:               killCommand.Use,
 		Short:             killCommand.Short,
@@ -49,7 +49,8 @@ var (
 )
 
 var (
-	killOptions = entities.KillOptions{}
+	killOptions  = entities.KillOptions{}
+	killCidFiles = []string{}
 )
 
 func killFlags(cmd *cobra.Command) {
@@ -61,7 +62,7 @@ func killFlags(cmd *cobra.Command) {
 	flags.StringVarP(&killOptions.Signal, signalFlagName, "s", "KILL", "Signal to send to the container")
 	_ = cmd.RegisterFlagCompletionFunc(signalFlagName, common.AutocompleteStopSignal)
 	cidfileFlagName := "cidfile"
-	flags.StringArrayVar(&cidFiles, cidfileFlagName, []string{}, "Read the container ID from the file")
+	flags.StringArrayVar(&killCidFiles, cidfileFlagName, nil, "Read the container ID from the file")
 	_ = cmd.RegisterFlagCompletionFunc(cidfileFlagName, completion.AutocompleteDefault)
 }
 
@@ -85,6 +86,7 @@ func kill(_ *cobra.Command, args []string) error {
 		err  error
 		errs utils.OutputErrors
 	)
+	args = utils.RemoveSlash(args)
 	// Check if the signalString provided by the user is valid
 	// Invalid signals will return err
 	sig, err := signal.ParseSignalNameOrNumber(killOptions.Signal)
@@ -94,10 +96,10 @@ func kill(_ *cobra.Command, args []string) error {
 	if sig < 1 || sig > 64 {
 		return errors.New("valid signals are 1 through 64")
 	}
-	for _, cidFile := range cidFiles {
-		content, err := ioutil.ReadFile(string(cidFile))
+	for _, cidFile := range killCidFiles {
+		content, err := os.ReadFile(cidFile)
 		if err != nil {
-			return errors.Wrap(err, "error reading CIDFile")
+			return fmt.Errorf("reading CIDFile: %w", err)
 		}
 		id := strings.Split(string(content), "\n")[0]
 		args = append(args, id)
@@ -108,10 +110,13 @@ func kill(_ *cobra.Command, args []string) error {
 		return err
 	}
 	for _, r := range responses {
-		if r.Err == nil {
-			fmt.Println(r.RawInput)
-		} else {
+		switch {
+		case r.Err != nil:
 			errs = append(errs, r.Err)
+		case r.RawInput != "":
+			fmt.Println(r.RawInput)
+		default:
+			fmt.Println(r.Id)
 		}
 	}
 	return errs.PrintErrors()

@@ -1,4 +1,4 @@
-% podman-system-reset(1)
+% podman-system-reset 1
 
 ## NAME
 podman\-system\-reset - Reset storage back to initial state
@@ -7,7 +7,9 @@ podman\-system\-reset - Reset storage back to initial state
 **podman system reset** [*options*]
 
 ## DESCRIPTION
-**podman system reset** removes all pods, containers, images and volumes.
+**podman system reset** removes all pods, containers, images, networks and volumes, and machines.
+It also removes the configured graphRoot and runRoot directories. Make sure these are not set to
+some important directory.
 
 This command must be run **before** changing any of the following fields in the
 `containers.conf` or `storage.conf` files: `driver`, `static_dir`, `tmp_dir`
@@ -16,6 +18,8 @@ or `volume_path`.
 `podman system reset` reads the current configuration and attempts to remove all
 of the relevant configurations. If the administrator modified the configuration files first,
 `podman system reset` might not be able to clean up the previous storage.
+
+`podman system reset` does not restart podman.service and podman.socket systemd units. You may need to manually restart it after running this command.
 
 ## OPTIONS
 #### **--force**, **-f**
@@ -27,6 +31,27 @@ Do not prompt for confirmation
 Print usage statement
 
 ## EXAMPLES
+
+Reset all storage back to a clean initialized state.
+```
+$ podman system reset
+WARNING! This will remove:
+        - all containers
+        - all pods
+        - all images
+        - all networks
+        - all build cache
+        - all machines
+        - all volumes
+        - the graphRoot directory: /var/lib/containers/storage
+        - the runRoot directory: /run/containers/storage
+Are you sure you want to continue? [y/N] y
+```
+
+Force reset all storage back to a clean initialized state.
+```
+$ podman system reset --force
+```
 
 ### Switching rootless user from VFS driver to overlay with fuse-overlayfs
 
@@ -43,7 +68,7 @@ if the program does not exist. Users can run `podman info` to ensure Podman is
 using fuse-overlayfs and the overlay driver.
 
 ## SEE ALSO
-`podman(1)`, `podman-system(1)`, `fuse-overlayfs(1)`, `containers-storage.conf(5)`
+**[podman(1)](podman.1.md)**, **[podman-system(1)](podman-system.1.md)**,  **[fuse-overlayfs(1)](https://github.com/containers/fuse-overlayfs/blob/main/fuse-overlayfs.1.md)**, **[containers-storage.conf(5)](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md)**
 
 ## HISTORY
 November 2019, Originally compiled by Dan Walsh (dwalsh at redhat dot com)

@@ -1,74 +1,52 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
 	"fmt"
-	"os"
 	"sort"
 
-	. "github.com/containers/podman/v3/test/utils"
-	"github.com/containers/storage/pkg/stringid"
-	. "github.com/onsi/ginkgo"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gexec"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 var _ = Describe("Podman diff", func() {
-	var (
-		tempdir    string
-		err        error
-		podmanTest *PodmanTestIntegration
-	)
-
-	BeforeEach(func() {
-		tempdir, err = CreateTempDirInTempDir()
-		if err != nil {
-			os.Exit(1)
-		}
-		podmanTest = PodmanTestCreate(tempdir)
-		podmanTest.Setup()
-		podmanTest.SeedImages()
-	})
-
-	AfterEach(func() {
-		podmanTest.Cleanup()
-		f := CurrentGinkgoTestDescription()
-		processTestResult(f)
-
-	})
 
 	It("podman diff of image", func() {
 		session := podmanTest.Podman([]string{"diff", ALPINE})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically(">", 0))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).ToNot(BeEmpty())
 	})
 
 	It("podman diff bogus image", func() {
 		session := podmanTest.Podman([]string{"diff", "1234"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(125))
+		Expect(session).Should(ExitWithError(125, "1234 not found: layer not known"))
 	})
 
 	It("podman diff image with json output", func() {
 		session := podmanTest.Podman([]string{"diff", "--format=json", ALPINE})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(session.IsJSONOutputValid()).To(BeTrue())
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).To(BeValidJSON())
 	})
 
 	It("podman diff container and committed image", func() {
 		session := podmanTest.Podman([]string{"run", "--name=diff-test", ALPINE, "touch", "/tmp/diff-test"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		session = podmanTest.Podman([]string{"diff", "diff-test"})
 		session.WaitWithDefaultTimeout()
 		containerDiff := session.OutputToStringArray()
 		sort.Strings(containerDiff)
-		Expect(session.LineInOutputContains("C /tmp")).To(BeTrue())
-		Expect(session.LineInOutputContains("A /tmp/diff-test")).To(BeTrue())
-		session = podmanTest.Podman([]string{"commit", "diff-test", "diff-test-img"})
+		Expect(session.OutputToString()).To(ContainSubstring("C /tmp"))
+		Expect(session.OutputToString()).To(ContainSubstring("A /tmp/diff-test"))
+		session = podmanTest.Podman([]string{"commit", "-q", "diff-test", "diff-test-img"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		session = podmanTest.Podman([]string{"diff", "diff-test-img"})
 		session.WaitWithDefaultTimeout()
 		imageDiff := session.OutputToStringArray()
@@ -79,7 +57,7 @@ var _ = Describe("Podman diff", func() {
 	It("podman diff latest container", func() {
 		session := podmanTest.Podman([]string{"run", "--name", "diff-test", ALPINE, "touch", "/tmp/diff-test"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 		if !IsRemote() {
 			session = podmanTest.Podman([]string{"diff", "-l"})
 		} else {
@@ -88,15 +66,15 @@ var _ = Describe("Podman diff", func() {
 		session.WaitWithDefaultTimeout()
 		containerDiff := session.OutputToStringArray()
 		sort.Strings(containerDiff)
-		Expect(session.LineInOutputContains("C /tmp")).To(BeTrue())
-		Expect(session.LineInOutputContains("A /tmp/diff-test")).To(BeTrue())
-		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("C /tmp"))
+		Expect(session.OutputToString()).To(ContainSubstring("A /tmp/diff-test"))
+		Expect(session).Should(ExitCleanly())
 	})
 
 	It("podman image diff", func() {
-		file1 := "/" + stringid.GenerateNonCryptoID()
-		file2 := "/" + stringid.GenerateNonCryptoID()
-		file3 := "/" + stringid.GenerateNonCryptoID()
+		file1 := "/" + stringid.GenerateRandomID()
+		file2 := "/" + stringid.GenerateRandomID()
+		file3 := "/" + stringid.GenerateRandomID()
 
 		// Create container image with the files
 		containerfile := fmt.Sprintf(`
@@ -119,42 +97,42 @@ RUN echo test
 
 		session := podmanTest.Podman([]string{"image", "diff", image})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically("==", 1))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 		Expect(session.OutputToString()).To(Equal("A " + file3))
 
 		session = podmanTest.Podman([]string{"image", "diff", image, baseImage})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically("==", 4))
-		Expect(session.LineInOutputContains("A " + file1)).To(BeTrue())
-		Expect(session.LineInOutputContains("A " + file2)).To(BeTrue())
-		Expect(session.LineInOutputContains("A " + file3)).To(BeTrue())
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(3))
+		Expect(session.OutputToString()).To(ContainSubstring("A " + file1))
+		Expect(session.OutputToString()).To(ContainSubstring("A " + file2))
+		Expect(session.OutputToString()).To(ContainSubstring("A " + file3))
 	})
 
 	It("podman image diff of single image", func() {
 		session := podmanTest.Podman([]string{"image", "diff", BB})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically(">", 0))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).ToNot(BeEmpty())
 	})
 
 	It("podman image diff bogus image", func() {
 		session := podmanTest.Podman([]string{"image", "diff", "1234", ALPINE})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(125))
+		Expect(session).Should(ExitWithError(125, "1234 not found: 1234: image not known"))
 	})
 
 	It("podman image diff of the same image", func() {
 		session := podmanTest.Podman([]string{"image", "diff", ALPINE, ALPINE})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically("==", 0))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(BeEmpty())
 	})
 
 	It("podman diff container and image with same name", func() {
-		imagefile := "/" + stringid.GenerateNonCryptoID()
-		confile := "/" + stringid.GenerateNonCryptoID()
+		imagefile := "/" + stringid.GenerateRandomID()
+		confile := "/" + stringid.GenerateRandomID()
 
 		// Create container image with the files
 		containerfile := fmt.Sprintf(`
@@ -166,27 +144,36 @@ RUN touch %s`, ALPINE, imagefile)
 
 		session := podmanTest.Podman([]string{"run", "--name", name, ALPINE, "touch", confile})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
 
 		// podman diff prefers image over container when they have the same name
 		session = podmanTest.Podman([]string{"diff", name})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically("==", 2))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 		Expect(session.OutputToString()).To(ContainSubstring(imagefile))
 
 		session = podmanTest.Podman([]string{"image", "diff", name})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically("==", 2))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 		Expect(session.OutputToString()).To(ContainSubstring(imagefile))
 
 		// container diff has to show the container
 		session = podmanTest.Podman([]string{"container", "diff", name})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
-		Expect(len(session.OutputToStringArray())).To(BeNumerically("==", 2))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(2))
 		Expect(session.OutputToString()).To(ContainSubstring(confile))
 	})
 
+	It("podman diff without args", func() {
+		session := podmanTest.Podman([]string{"diff"})
+		session.WaitWithDefaultTimeout()
+		if IsRemote() {
+			Expect(session).Should(ExitWithError(125, " requires a name or id"))
+		} else {
+			Expect(session).Should(ExitWithError(125, " requires a name, id, or the \"--latest\" flag"))
+		}
+	})
 })

@@ -46,6 +46,9 @@ with POST parameters if present, and compares return status and
            |                     +----------- POST params
            +--------------------------------- note the missing slash
 
+Never, ever, ever, seriously _EVER_ `exit` from a test. Just don't.
+That skips cleanup, and leaves the system in a broken state.
+
 Notes:
 
 * If the endpoint has a leading slash (`/_ping`), `t` leaves it unchanged.
@@ -60,9 +63,20 @@ of POST parameters in the form 'key=value', separated by spaces:
      t POST myentrypoint name=$name badparam='["foo","bar"]' 500  ! etc...
 `t` will convert the param list to JSON form for passing to the server.
 A numeric status code terminates processing of POST parameters.
+** As a special case, when one POST argument is a string ending in `.tar`,
+`.yaml`, or `.json`, `t` will invoke `curl` with `--data-binary @PATH` and
+set `Content-type` as appropriate. This is useful for `build` endpoints.
+(To override `Content-type`, simply pass along an extra string argument
+matching `application/*`):
+      t POST myentrypoint /mytmpdir/myfile.tar application/foo 400
+** Like above, when using PUT, `t` does `--upload-time` instead of
+`--data-binary`
 
 * The final arguments are one or more expected string results. If an
 argument starts with a dot, `t` will invoke `jq` on the output to
 fetch that field, and will compare it to the right-hand side of
 the argument. If the separator is `=` (equals), `t` will require
 an exact match; if `~` (tilde), `t` will use `expr` to compare.
+
+* If your test expects `curl` to time out:
+     APIV2_TEST_EXPECT_TIMEOUT=5 t POST /foo 999

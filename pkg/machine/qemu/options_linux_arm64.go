@@ -1,30 +1,25 @@
+//go:build linux && arm64
+
 package qemu
 
 import (
-	"os"
 	"path/filepath"
+
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 var (
 	QemuCommand = "qemu-system-aarch64"
 )
 
-func (v *MachineVM) addArchOptions() []string {
+func (q *QEMUStubber) addArchOptions(_ *setNewMachineCMDOpts) []string {
 	opts := []string{
 		"-accel", "kvm",
 		"-cpu", "host",
-		"-M", "virt,gic-version=max",
+		"-M", "virt,gic-version=max,memory-backend=mem",
 		"-bios", getQemuUefiFile("QEMU_EFI.fd"),
 	}
 	return opts
-}
-
-func (v *MachineVM) prepare() error {
-	return nil
-}
-
-func (v *MachineVM) archRemovalFiles() []string {
-	return []string{}
 }
 
 func getQemuUefiFile(name string) string {
@@ -33,7 +28,7 @@ func getQemuUefiFile(name string) string {
 		"/usr/share/edk2/aarch64",
 	}
 	for _, dir := range dirs {
-		if _, err := os.Stat(dir); err == nil {
+		if err := fileutils.Exists(dir); err == nil {
 			return filepath.Join(dir, name)
 		}
 	}

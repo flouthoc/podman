@@ -1,8 +1,8 @@
 package driver
 
 import (
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/storage"
+	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/storage"
 )
 
 // GetDriverData returns information on a given store's running graph driver.

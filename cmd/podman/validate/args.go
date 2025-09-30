@@ -1,12 +1,12 @@
 package validate
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -23,11 +23,12 @@ func SubCommandExists(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		suggestions := cmd.SuggestionsFor(args[0])
 		if len(suggestions) == 0 {
-			return errors.Errorf("unrecognized command `%[1]s %[2]s`\nTry '%[1]s --help' for more information.", cmd.CommandPath(), args[0])
+			return fmt.Errorf("unrecognized command `%[1]s %[2]s`\nTry '%[1]s --help' for more information", cmd.CommandPath(), args[0])
 		}
-		return errors.Errorf("unrecognized command `%[1]s %[2]s`\n\nDid you mean this?\n\t%[3]s\n\nTry '%[1]s --help' for more information.", cmd.CommandPath(), args[0], strings.Join(suggestions, "\n\t"))
+		return fmt.Errorf("unrecognized command `%[1]s %[2]s`\n\nDid you mean this?\n\t%[3]s\n\nTry '%[1]s --help' for more information", cmd.CommandPath(), args[0], strings.Join(suggestions, "\n\t"))
 	}
-	return errors.Errorf("missing command '%[1]s COMMAND'\nTry '%[1]s --help' for more information.", cmd.CommandPath())
+	cmd.Help() //nolint: errcheck
+	return fmt.Errorf("missing command '%[1]s COMMAND'", cmd.CommandPath())
 }
 
 // IDOrLatestArgs used to validate a nameOrId was provided or the "--latest" flag
@@ -43,46 +44,49 @@ func IDOrLatestArgs(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("%q requires a name, id, or the \"--latest\" flag", cmd.CommandPath())
 		}
 		if len(args) > 0 && given {
-			return fmt.Errorf("--latest and containers cannot be used together")
+			return errors.New("--latest and containers cannot be used together")
 		}
 	}
 	return nil
 }
 
-// TODO: the two functions CheckAllLatestAndCIDFile and CheckAllLatestAndPodIDFile are almost identical.
-//       It may be worth looking into generalizing the two a bit more and share code but time is scarce and
-//       we only live once.
-
-// CheckAllLatestAndCIDFile checks that --all and --latest are used correctly.
-// If cidfile is set, also check for the --cidfile flag.
-func CheckAllLatestAndCIDFile(c *cobra.Command, args []string, ignoreArgLen bool, cidfile bool) error {
+// CheckAllLatestAndIDFile checks that --all and --latest are used correctly for containers and pods
+// If idFileFlag is set, also checks for the --cidfile or --pod-id-file flag.
+func CheckAllLatestAndIDFile(c *cobra.Command, args []string, ignoreArgLen bool, idFileFlag string) error {
 	var specifiedLatest bool
 	argLen := len(args)
 	if !registry.IsRemote() {
 		specifiedLatest, _ = c.Flags().GetBool("latest")
 		if c.Flags().Lookup("all") == nil || c.Flags().Lookup("latest") == nil {
-			if !cidfile {
-				return errors.New("unable to lookup values for 'latest' or 'all'")
-			} else if c.Flags().Lookup("cidfile") == nil {
-				return errors.New("unable to lookup values for 'latest', 'all' or 'cidfile'")
+			if idFileFlag == "" {
+				return errors.New("unable to look up values for 'latest' or 'all'")
+			} else if c.Flags().Lookup(idFileFlag) == nil {
+				return fmt.Errorf("unable to look up values for 'latest', 'all', or '%s'", idFileFlag)
 			}
 		}
 	}
 
 	specifiedAll, _ := c.Flags().GetBool("all")
-	specifiedCIDFile := false
-	if cid, _ := c.Flags().GetStringArray("cidfile"); len(cid) > 0 {
-		specifiedCIDFile = true
+	specifiedIDFile := false
+	if cid, _ := c.Flags().GetStringArray(idFileFlag); len(cid) > 0 {
+		specifiedIDFile = true
 	}
 
-	if specifiedCIDFile && (specifiedAll || specifiedLatest) {
-		return errors.Errorf("--all, --latest and --cidfile cannot be used together")
+	if c.Flags().Changed("filter") {
+		if argLen > 0 {
+			return errors.New("--filter takes no arguments")
+		}
+		return nil
+	}
+
+	if specifiedIDFile && (specifiedAll || specifiedLatest) {
+		return fmt.Errorf("--all, --latest, and --%s cannot be used together", idFileFlag)
 	} else if specifiedAll && specifiedLatest {
-		return errors.Errorf("--all and --latest cannot be used together")
+		return errors.New("--all and --latest cannot be used together")
 	}
 
 	if (argLen > 0) && specifiedAll {
-		return errors.Errorf("no arguments are needed with --all")
+		return errors.New("no arguments are needed with --all")
 	}
 
 	if ignoreArgLen {
@@ -91,73 +95,18 @@ func CheckAllLatestAndCIDFile(c *cobra.Command, args []string, ignoreArgLen bool
 
 	if argLen > 0 {
 		if specifiedLatest {
-			return errors.Errorf("--latest and containers cannot be used together")
-		} else if cidfile && (specifiedLatest || specifiedCIDFile) {
-			return errors.Errorf("no arguments are needed with --latest or --cidfile")
+			return errors.New("--latest and containers cannot be used together")
+		} else if idFileFlag != "" && (specifiedLatest || specifiedIDFile) {
+			return fmt.Errorf("no arguments are needed with --latest or --%s", idFileFlag)
 		}
 	}
 
-	if specifiedCIDFile {
+	if specifiedIDFile {
 		return nil
 	}
 
-	if argLen < 1 && !specifiedAll && !specifiedLatest && !specifiedCIDFile {
-		return errors.Errorf("you must provide at least one name or id")
-	}
-	return nil
-}
-
-// CheckAllLatestAndPodIDFile checks that --all and --latest are used correctly.
-// If withIDFile is set, also check for the --pod-id-file flag.
-func CheckAllLatestAndPodIDFile(c *cobra.Command, args []string, ignoreArgLen bool, withIDFile bool) error {
-	var specifiedLatest bool
-	argLen := len(args)
-	if !registry.IsRemote() {
-		// remote clients have no latest flag
-		specifiedLatest, _ = c.Flags().GetBool("latest")
-		if c.Flags().Lookup("all") == nil || c.Flags().Lookup("latest") == nil {
-			if !withIDFile {
-				return errors.New("unable to lookup values for 'latest' or 'all'")
-			} else if c.Flags().Lookup("pod-id-file") == nil {
-				return errors.New("unable to lookup values for 'latest', 'all' or 'pod-id-file'")
-			}
-		}
-	}
-
-	specifiedAll, _ := c.Flags().GetBool("all")
-	specifiedPodIDFile := false
-	if pid, _ := c.Flags().GetStringArray("pod-id-file"); len(pid) > 0 {
-		specifiedPodIDFile = true
-	}
-
-	if specifiedPodIDFile && (specifiedAll || specifiedLatest) {
-		return errors.Errorf("--all, --latest and --pod-id-file cannot be used together")
-	} else if specifiedAll && specifiedLatest {
-		return errors.Errorf("--all and --latest cannot be used together")
-	}
-
-	if (argLen > 0) && specifiedAll {
-		return errors.Errorf("no arguments are needed with --all")
-	}
-
-	if ignoreArgLen {
-		return nil
-	}
-
-	if argLen > 0 {
-		if specifiedLatest {
-			return errors.Errorf("--latest and pods cannot be used together")
-		} else if withIDFile && (specifiedLatest || specifiedPodIDFile) {
-			return errors.Errorf("no arguments are needed with --latest or --pod-id-file")
-		}
-	}
-
-	if specifiedPodIDFile {
-		return nil
-	}
-
-	if argLen < 1 && !specifiedAll && !specifiedLatest && !specifiedPodIDFile {
-		return errors.Errorf("you must provide at least one name or id")
+	if argLen < 1 && !specifiedAll && !specifiedLatest && !specifiedIDFile {
+		return errors.New("you must provide at least one name or id")
 	}
 	return nil
 }

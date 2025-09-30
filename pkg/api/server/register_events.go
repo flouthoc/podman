@@ -1,9 +1,11 @@
+//go:build !remote
+
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/api/handlers/compat"
+	"github.com/containers/podman/v5/pkg/api/handlers/compat"
 	"github.com/gorilla/mux"
 )
 
@@ -33,10 +35,10 @@ func (s *APIServer) registerEventsHandlers(r *mux.Router) error {
 	//   200:
 	//     description: returns a string of json data describing an event
 	//   500:
-	//     "$ref": "#/responses/InternalError"
-	r.Handle(VersionedPath("/events"), s.APIHandler(compat.GetEvents)).Methods(http.MethodGet)
+	//     "$ref": "#/responses/internalError"
+	r.Handle(VersionedPath("/events"), s.StreamBufferedAPIHandler(compat.GetEvents)).Methods(http.MethodGet)
 	// Added non version path to URI to support docker non versioned paths
-	r.Handle("/events", s.APIHandler(compat.GetEvents)).Methods(http.MethodGet)
+	r.Handle("/events", s.StreamBufferedAPIHandler(compat.GetEvents)).Methods(http.MethodGet)
 	// swagger:operation GET /libpod/events system SystemEventsLibpod
 	// ---
 	// tags:
@@ -67,7 +69,7 @@ func (s *APIServer) registerEventsHandlers(r *mux.Router) error {
 	//   200:
 	//     description: returns a string of json data describing an event
 	//   500:
-	//     "$ref": "#/responses/InternalError"
+	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/events"), s.APIHandler(compat.GetEvents)).Methods(http.MethodGet)
 	return nil
 }

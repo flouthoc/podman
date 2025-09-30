@@ -7,6 +7,7 @@
 load helpers
 
 @test "podman container storage is not accessible by unprivileged users" {
+    skip_if_cgroupsv1 "run --uidmap fails on cgroups v1 (issue 15025, wontfix)"
     skip_if_rootless "test meaningless without suid"
     skip_if_remote
 
@@ -49,6 +50,15 @@ if chmod +w "$path"; then
     die "Able to chmod $path"
 fi
 
+EOF
+
+    # Under overlay, and presumably any future storage drivers, we
+    # should never be able to read or write $path.
+    #
+    # Under VFS, though, if podman has *ever* been run with --uidmap,
+    # all images become world-accessible. So don't bother checking.
+    if [[ $(podman_storage_driver) != "vfs" ]]; then
+        cat >>$test_script <<EOF
 if [ -d "$path" ]; then
     if ls "$path" >/dev/null; then
         die "Able to run 'ls $path' without error"
@@ -66,8 +76,9 @@ else
     fi
 fi
 
-exit 0
 EOF
+    fi
+    echo "exit 0" >>$test_script
     chmod 755 $PODMAN_TMPDIR $test_script
 
     # get podman image and container storage directories
@@ -96,16 +107,12 @@ EOF
     run_podman rm c_mount
 
     run_podman rm c_uidmap c_uidmap_v
+    run_podman volume rm foo
 }
 
 
 # #6957 - mask out /proc/acpi, /sys/dev, and other sensitive system files
 @test "sensitive mount points are masked without --privileged" {
-    # Weird error, maybe a flake?
-    #   can only attach to created or running containers: container state improper
-    # https://github.com/containers/podman/pull/7111#issuecomment-666858715
-    skip_if_remote "FIXME: Weird flake"
-
     # FIXME: this should match the list in pkg/specgen/generate/config_linux.go
     local -a mps=(
         /proc/acpi
@@ -123,19 +130,20 @@ EOF
 
     # Some of the above may not exist on our host. Find only the ones that do.
     local -a subset=()
-    for mp in ${mps[@]}; do
+    for mp in "${mps[@]}"; do
         if [ -e $mp ]; then
             subset+=($mp)
         fi
     done
 
+    # If the image does not exists, the pull output will make the test below fail
+    _prefetch $IMAGE
+
     # Run 'stat' on all the files, plus /dev/null. Get path, file type,
     # number of links, major, and minor (see below for why). Do it all
     # in one go, to avoid multiple podman-runs
-    run_podman '?' run --rm $IMAGE stat -c'%n:%F:%h:%T:%t' /dev/null ${subset[@]}
-    if [[ $status -gt 1 ]]; then
-        die "Unexpected exit status $status: expected 0 or 1"
-    fi
+    run_podman '?' run --rm $IMAGE stat -c'%n:%F:%h:%T:%t' /dev/null "${subset[@]}"
+    assert $status -le 1 "stat exit status: expected 0 or 1"
 
     local devnull=
     for result in "${lines[@]}"; do

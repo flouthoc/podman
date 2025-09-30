@@ -1,17 +1,18 @@
 package shutdown
 
 import (
+	"errors"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
+	logrusImport "github.com/sirupsen/logrus"
 )
 
 var (
-	ErrHandlerExists error = errors.New("handler with given name already exists")
+	ErrHandlerExists = errors.New("handler with given name already exists")
 )
 
 var (
@@ -25,17 +26,27 @@ var (
 	// Ordering that on-shutdown handlers will be invoked.
 	handlerOrder    []string
 	shutdownInhibit sync.RWMutex
+	logrus          = logrusImport.WithField("PID", os.Getpid())
+	ErrNotStarted   = errors.New("shutdown signal handler has not yet been started")
+	// exitCode used to exit once we are done with all signal handlers, by default 1
+	exitCode = 1
 )
 
+// SetExitCode when we exit after we ran all shutdown handlers, it should be positive.
+func SetExitCode(i int) {
+	exitCode = i
+}
+
 // Start begins handling SIGTERM and SIGINT and will run the given on-signal
-// handlers when one is called. This can be cancelled by calling Stop().
+// handlers when one is called and then exit with the exit code of 1 if not
+// overwritten with SetExitCode(). This can be cancelled by calling Stop().
 func Start() error {
 	if sigChan != nil {
 		// Already running, do nothing.
 		return nil
 	}
 
-	sigChan = make(chan os.Signal, 1)
+	sigChan = make(chan os.Signal, 2)
 	cancelChan = make(chan bool, 1)
 	stopped = false
 
@@ -44,28 +55,35 @@ func Start() error {
 	go func() {
 		select {
 		case <-cancelChan:
+			logrus.Infof("Received shutdown.Stop(), terminating!")
 			signal.Stop(sigChan)
 			close(sigChan)
 			close(cancelChan)
 			stopped = true
 			return
 		case sig := <-sigChan:
-			logrus.Infof("Received shutdown signal %v, terminating!", sig)
+			logrus.Infof("Received shutdown signal %q, terminating!", sig.String())
 			shutdownInhibit.Lock()
 			handlerLock.Lock()
+
 			for _, name := range handlerOrder {
 				handler, ok := handlers[name]
 				if !ok {
-					logrus.Errorf("Shutdown handler %s definition not found!", name)
+					logrus.Errorf("Shutdown handler %q definition not found!", name)
 					continue
 				}
-				logrus.Infof("Invoking shutdown handler %s", name)
+
+				logrus.Infof("Invoking shutdown handler %q", name)
+				start := time.Now()
 				if err := handler(sig); err != nil {
-					logrus.Errorf("Error running shutdown handler %s: %v", name, err)
+					logrus.Errorf("Running shutdown handler %q: %v", name, err)
 				}
+				logrus.Debugf("Completed shutdown handler %q, duration %v", name,
+					time.Since(start).Round(time.Second))
 			}
 			handlerLock.Unlock()
 			shutdownInhibit.Unlock()
+			os.Exit(exitCode)
 			return
 		}
 	}()
@@ -76,23 +94,28 @@ func Start() error {
 // Stop the shutdown signal handler.
 func Stop() error {
 	if cancelChan == nil {
-		return errors.New("shutdown signal handler has not yet been started")
+		return ErrNotStarted
 	}
 	if stopped {
 		return nil
 	}
 
+	// if the signal handler is running, wait that it terminates
+	handlerLock.Lock()
+	defer handlerLock.Unlock()
+	// it doesn't need to be in the critical section, but staticcheck complains if
+	// the critical section is empty.
 	cancelChan <- true
 
 	return nil
 }
 
-// Temporarily inhibit signals from shutting down Libpod.
+// Inhibit temporarily inhibit signals from shutting down Libpod.
 func Inhibit() {
 	shutdownInhibit.RLock()
 }
 
-// Stop inhibiting signals from shutting down Libpod.
+// Uninhibit stop inhibiting signals from shutting down Libpod.
 func Uninhibit() {
 	shutdownInhibit.RUnlock()
 }

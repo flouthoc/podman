@@ -1,9 +1,9 @@
 package lock
 
 import (
+	"errors"
+	"fmt"
 	"sync"
-
-	"github.com/pkg/errors"
 )
 
 // Mutex holds a single mutex and whether it has been allocated.
@@ -49,7 +49,7 @@ type InMemoryManager struct {
 // of locks.
 func NewInMemoryManager(numLocks uint32) (Manager, error) {
 	if numLocks == 0 {
-		return nil, errors.Errorf("must provide a non-zero number of locks!")
+		return nil, errors.New("must provide a non-zero number of locks")
 	}
 
 	manager := new(InMemoryManager)
@@ -57,7 +57,7 @@ func NewInMemoryManager(numLocks uint32) (Manager, error) {
 	manager.locks = make([]*Mutex, numLocks)
 
 	var i uint32
-	for i = 0; i < numLocks; i++ {
+	for i = range numLocks {
 		lock := new(Mutex)
 		lock.id = i
 		manager.locks[i] = lock
@@ -78,13 +78,13 @@ func (m *InMemoryManager) AllocateLock() (Locker, error) {
 		}
 	}
 
-	return nil, errors.Errorf("all locks have been allocated")
+	return nil, errors.New("all locks have been allocated")
 }
 
 // RetrieveLock retrieves a lock from the manager.
 func (m *InMemoryManager) RetrieveLock(id uint32) (Locker, error) {
 	if id >= m.numLocks {
-		return nil, errors.Errorf("given lock ID %d is too large - this manager only supports lock indexes up to %d", id, m.numLocks-1)
+		return nil, fmt.Errorf("given lock ID %d is too large - this manager only supports lock indexes up to %d", id, m.numLocks-1)
 	}
 
 	return m.locks[id], nil
@@ -94,11 +94,11 @@ func (m *InMemoryManager) RetrieveLock(id uint32) (Locker, error) {
 // use) and returns it.
 func (m *InMemoryManager) AllocateAndRetrieveLock(id uint32) (Locker, error) {
 	if id >= m.numLocks {
-		return nil, errors.Errorf("given lock ID %d is too large - this manager only supports lock indexes up to %d", id, m.numLocks)
+		return nil, fmt.Errorf("given lock ID %d is too large - this manager only supports lock indexes up to %d", id, m.numLocks)
 	}
 
 	if m.locks[id].allocated {
-		return nil, errors.Errorf("given lock ID %d is already in use, cannot reallocate", id)
+		return nil, fmt.Errorf("given lock ID %d is already in use, cannot reallocate", id)
 	}
 
 	m.locks[id].allocated = true
@@ -115,4 +115,34 @@ func (m *InMemoryManager) FreeAllLocks() error {
 	}
 
 	return nil
+}
+
+// Get number of available locks
+func (m *InMemoryManager) AvailableLocks() (*uint32, error) {
+	var count uint32
+
+	for _, lock := range m.locks {
+		if !lock.allocated {
+			count++
+		}
+	}
+
+	return &count, nil
+}
+
+// Get any locks that are presently being held.
+// Useful for debugging deadlocks.
+func (m *InMemoryManager) LocksHeld() ([]uint32, error) {
+	//nolint:prealloc
+	var locks []uint32
+
+	for _, lock := range m.locks {
+		if lock.lock.TryLock() {
+			lock.lock.Unlock()
+			continue
+		}
+		locks = append(locks, lock.ID())
+	}
+
+	return locks, nil
 }

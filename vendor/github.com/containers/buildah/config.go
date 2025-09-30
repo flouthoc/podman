@@ -3,63 +3,73 @@ package buildah
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
-	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/containerd/platforms"
 	"github.com/containers/buildah/define"
 	"github.com/containers/buildah/docker"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/image/v5/transports"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage/pkg/stringid"
+	internalUtil "github.com/containers/buildah/internal/util"
 	ociv1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/pkg/compression"
+	"go.podman.io/image/v5/transports"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 // unmarshalConvertedConfig obtains the config blob of img valid for the wantedManifestMIMEType format
 // (either as it exists, or converting the image if necessary), and unmarshals it into dest.
 // NOTE: The MIME type is of the _manifest_, not of the _config_ that is returned.
-func unmarshalConvertedConfig(ctx context.Context, dest interface{}, img types.Image, wantedManifestMIMEType string) error {
+func unmarshalConvertedConfig(ctx context.Context, dest any, img types.Image, wantedManifestMIMEType string) error {
 	_, actualManifestMIMEType, err := img.Manifest(ctx)
 	if err != nil {
-		return errors.Wrapf(err, "error getting manifest MIME type for %q", transports.ImageName(img.Reference()))
+		return fmt.Errorf("getting manifest MIME type for %q: %w", transports.ImageName(img.Reference()), err)
 	}
 	if wantedManifestMIMEType != actualManifestMIMEType {
+		layerInfos := img.LayerInfos()
+		for i := range layerInfos { // force the "compression" to gzip, which is supported by all of the formats we care about
+			layerInfos[i].CompressionOperation = types.Compress
+			layerInfos[i].CompressionAlgorithm = &compression.Gzip
+		}
 		updatedImg, err := img.UpdatedImage(ctx, types.ManifestUpdateOptions{
-			ManifestMIMEType: wantedManifestMIMEType,
-			InformationOnly: types.ManifestUpdateInformation{ // Strictly speaking, every value in here is invalid. But…
-				Destination:  nil, // Destination is technically required, but actually necessary only for conversion _to_ v2s1.  Leave it nil, we will crash if that ever changes.
-				LayerInfos:   nil, // LayerInfos is necessary for size information in v2s2/OCI manifests, but the code can work with nil, and we are not reading the converted manifest at all.
-				LayerDiffIDs: nil, // LayerDiffIDs are actually embedded in the converted manifest, but the code can work with nil, and the values are not needed until pushing the finished image, at which time containerImageRef.NewImageSource builds the values from scratch.
-			},
+			LayerInfos: layerInfos,
 		})
 		if err != nil {
-			return errors.Wrapf(err, "error converting image %q from %q to %q", transports.ImageName(img.Reference()), actualManifestMIMEType, wantedManifestMIMEType)
+			return fmt.Errorf("resetting recorded compression for %q: %w", transports.ImageName(img.Reference()), err)
 		}
-		img = updatedImg
+		secondUpdatedImg, err := updatedImg.UpdatedImage(ctx, types.ManifestUpdateOptions{
+			ManifestMIMEType: wantedManifestMIMEType,
+		})
+		if err != nil {
+			return fmt.Errorf("converting image %q from %q to %q: %w", transports.ImageName(img.Reference()), actualManifestMIMEType, wantedManifestMIMEType, err)
+		}
+		img = secondUpdatedImg
 	}
 	config, err := img.ConfigBlob(ctx)
 	if err != nil {
-		return errors.Wrapf(err, "error reading %s config from %q", wantedManifestMIMEType, transports.ImageName(img.Reference()))
+		return fmt.Errorf("reading %s config from %q: %w", wantedManifestMIMEType, transports.ImageName(img.Reference()), err)
 	}
 	if err := json.Unmarshal(config, dest); err != nil {
-		return errors.Wrapf(err, "error parsing %s configuration %q from %q", wantedManifestMIMEType, string(config), transports.ImageName(img.Reference()))
+		return fmt.Errorf("parsing %s configuration %q from %q: %w", wantedManifestMIMEType, string(config), transports.ImageName(img.Reference()), err)
 	}
 	return nil
 }
 
-func (b *Builder) initConfig(ctx context.Context, img types.Image) error {
+func (b *Builder) initConfig(ctx context.Context, sys *types.SystemContext, img types.Image, options *BuilderOptions) error {
 	if img != nil { // A pre-existing image, as opposed to a "FROM scratch" new one.
 		rawManifest, manifestMIMEType, err := img.Manifest(ctx)
 		if err != nil {
-			return errors.Wrapf(err, "error reading image manifest for %q", transports.ImageName(img.Reference()))
+			return fmt.Errorf("reading image manifest for %q: %w", transports.ImageName(img.Reference()), err)
 		}
 		rawConfig, err := img.ConfigBlob(ctx)
 		if err != nil {
-			return errors.Wrapf(err, "error reading image configuration for %q", transports.ImageName(img.Reference()))
+			return fmt.Errorf("reading image configuration for %q: %w", transports.ImageName(img.Reference()), err)
 		}
 		b.Manifest = rawManifest
 		b.Config = rawConfig
@@ -80,18 +90,38 @@ func (b *Builder) initConfig(ctx context.Context, img types.Image) error {
 			// Attempt to recover format-specific data from the manifest.
 			v1Manifest := ociv1.Manifest{}
 			if err := json.Unmarshal(b.Manifest, &v1Manifest); err != nil {
-				return errors.Wrapf(err, "error parsing OCI manifest %q", string(b.Manifest))
+				return fmt.Errorf("parsing OCI manifest %q: %w", string(b.Manifest), err)
 			}
-			b.ImageAnnotations = v1Manifest.Annotations
+			if len(v1Manifest.Annotations) > 0 {
+				if b.ImageAnnotations == nil {
+					b.ImageAnnotations = make(map[string]string, len(v1Manifest.Annotations))
+				}
+				maps.Copy(b.ImageAnnotations, v1Manifest.Annotations)
+			}
+		}
+	} else {
+		if options == nil || options.CompatScratchConfig != types.OptionalBoolTrue {
+			b.Docker = docker.V2Image{
+				V1Image: docker.V1Image{
+					Config: &docker.Config{
+						WorkingDir: "/",
+					},
+				},
+			}
+			b.OCIv1 = ociv1.Image{
+				Config: ociv1.ImageConfig{
+					WorkingDir: "/",
+				},
+			}
 		}
 	}
 
 	b.setupLogger()
-	b.fixupConfig()
+	b.fixupConfig(sys)
 	return nil
 }
 
-func (b *Builder) fixupConfig() {
+func (b *Builder) fixupConfig(sys *types.SystemContext) {
 	if b.Docker.Config != nil {
 		// Prefer image-level settings over those from the container it was built from.
 		b.Docker.ContainerConfig = *b.Docker.Config
@@ -105,11 +135,26 @@ func (b *Builder) fixupConfig() {
 	if b.OCIv1.Created == nil || b.OCIv1.Created.IsZero() {
 		b.OCIv1.Created = &now
 	}
+	currentPlatformSpecification := platforms.DefaultSpec()
 	if b.OS() == "" {
-		b.SetOS(runtime.GOOS)
+		if sys != nil && sys.OSChoice != "" {
+			b.SetOS(sys.OSChoice)
+		} else {
+			b.SetOS(currentPlatformSpecification.OS)
+		}
 	}
 	if b.Architecture() == "" {
-		b.SetArchitecture(runtime.GOARCH)
+		if sys != nil && sys.ArchitectureChoice != "" {
+			b.SetArchitecture(sys.ArchitectureChoice)
+			b.SetVariant(sys.VariantChoice)
+		} else {
+			b.SetArchitecture(currentPlatformSpecification.Architecture)
+			b.SetVariant(currentPlatformSpecification.Variant)
+		}
+		// in case the arch string we started with was shorthand for a known arch+variant pair, normalize it
+		ps := internalUtil.NormalizePlatform(ociv1.Platform{OS: b.OS(), Architecture: b.Architecture(), Variant: b.Variant()})
+		b.SetArchitecture(ps.Architecture)
+		b.SetVariant(ps.Variant)
 	}
 	if b.Format == define.Dockerv2ImageManifest && b.Hostname() == "" {
 		b.SetHostname(stringid.TruncateID(stringid.GenerateRandomID()))
@@ -126,7 +171,7 @@ func (b *Builder) setupLogger() {
 
 // Annotations returns a set of key-value pairs from the image's manifest.
 func (b *Builder) Annotations() map[string]string {
-	return copyStringStringMap(b.ImageAnnotations)
+	return maps.Clone(b.ImageAnnotations)
 }
 
 // SetAnnotation adds or overwrites a key's value from the image's manifest.
@@ -148,7 +193,7 @@ func (b *Builder) UnsetAnnotation(key string) {
 // ClearAnnotations removes all keys and their values from the image's
 // manifest.
 func (b *Builder) ClearAnnotations() {
-	b.ImageAnnotations = map[string]string{}
+	b.ImageAnnotations = nil
 }
 
 // CreatedBy returns a description of how this image was built.
@@ -174,6 +219,69 @@ func (b *Builder) SetOS(os string) {
 	b.Docker.OS = os
 }
 
+// OSVersion returns a version of the OS on which the container, or a container
+// built using an image built from this container, is intended to be run.
+func (b *Builder) OSVersion() string {
+	return b.OCIv1.OSVersion
+}
+
+// SetOSVersion sets the version of the OS on which the container, or a
+// container built using an image built from this container, is intended to be
+// run.
+func (b *Builder) SetOSVersion(version string) {
+	b.OCIv1.OSVersion = version
+	b.Docker.OSVersion = version
+}
+
+// OSFeatures returns a list of OS features which the container, or a container
+// built using an image built from this container, depends on the OS supplying.
+func (b *Builder) OSFeatures() []string {
+	return slices.Clone(b.OCIv1.OSFeatures)
+}
+
+// SetOSFeature adds a feature of the OS which the container, or a container
+// built using an image built from this container, depends on the OS supplying.
+func (b *Builder) SetOSFeature(feature string) {
+	if !slices.Contains(b.OCIv1.OSFeatures, feature) {
+		b.OCIv1.OSFeatures = append(b.OCIv1.OSFeatures, feature)
+	}
+	if !slices.Contains(b.Docker.OSFeatures, feature) {
+		b.Docker.OSFeatures = append(b.Docker.OSFeatures, feature)
+	}
+}
+
+// UnsetOSFeature removes a feature of the OS which the container, or a
+// container built using an image built from this container, depends on the OS
+// supplying.
+func (b *Builder) UnsetOSFeature(feature string) {
+	if slices.Contains(b.OCIv1.OSFeatures, feature) {
+		features := make([]string, 0, len(b.OCIv1.OSFeatures))
+		for _, f := range b.OCIv1.OSFeatures {
+			if f != feature {
+				features = append(features, f)
+			}
+		}
+		b.OCIv1.OSFeatures = features
+	}
+	if slices.Contains(b.Docker.OSFeatures, feature) {
+		features := make([]string, 0, len(b.Docker.OSFeatures))
+		for _, f := range b.Docker.OSFeatures {
+			if f != feature {
+				features = append(features, f)
+			}
+		}
+		b.Docker.OSFeatures = features
+	}
+}
+
+// ClearOSFeatures clears the list of features of the OS which the container,
+// or a container built using an image built from this container, depends on
+// the OS supplying.
+func (b *Builder) ClearOSFeatures() {
+	b.OCIv1.OSFeatures = []string{}
+	b.Docker.OSFeatures = []string{}
+}
+
 // Architecture returns a name of the architecture on which the container, or a
 // container built using an image built from this container, is intended to be
 // run.
@@ -187,6 +295,21 @@ func (b *Builder) Architecture() string {
 func (b *Builder) SetArchitecture(arch string) {
 	b.OCIv1.Architecture = arch
 	b.Docker.Architecture = arch
+}
+
+// Variant returns a name of the architecture variant on which the container,
+// or a container built using an image built from this container, is intended
+// to be run.
+func (b *Builder) Variant() string {
+	return b.OCIv1.Variant
+}
+
+// SetVariant sets the name of the architecture variant on which the container,
+// or a container built using an image built from this container, is intended
+// to be run.
+func (b *Builder) SetVariant(variant string) {
+	b.Docker.Variant = variant
+	b.OCIv1.Variant = variant
 }
 
 // Maintainer returns contact information for the person who built the image.
@@ -217,7 +340,7 @@ func (b *Builder) SetUser(spec string) {
 
 // OnBuild returns the OnBuild value from the container.
 func (b *Builder) OnBuild() []string {
-	return copyStringSlice(b.Docker.Config.OnBuild)
+	return slices.Clone(b.Docker.Config.OnBuild)
 }
 
 // ClearOnBuild removes all values from the OnBuild structure
@@ -231,7 +354,7 @@ func (b *Builder) ClearOnBuild() {
 // discarded when writing images using OCIv1 formats.
 func (b *Builder) SetOnBuild(onBuild string) {
 	if onBuild != "" && b.Format != define.Dockerv2ImageManifest {
-		logrus.Warnf("ONBUILD is not supported for OCI image format, %s will be ignored. Must use `docker` format", onBuild)
+		b.Logger.Warnf("ONBUILD is not supported for OCI image format, %s will be ignored. Must use `docker` format", onBuild)
 	}
 	b.Docker.Config.OnBuild = append(b.Docker.Config.OnBuild, onBuild)
 }
@@ -253,7 +376,7 @@ func (b *Builder) SetWorkDir(there string) {
 // Shell returns the default shell for running commands in the
 // container, or in a container built using an image built from this container.
 func (b *Builder) Shell() []string {
-	return copyStringSlice(b.Docker.Config.Shell)
+	return slices.Clone(b.Docker.Config.Shell)
 }
 
 // SetShell sets the default shell for running
@@ -263,16 +386,16 @@ func (b *Builder) Shell() []string {
 // discarded when writing images using OCIv1 formats.
 func (b *Builder) SetShell(shell []string) {
 	if len(shell) > 0 && b.Format != define.Dockerv2ImageManifest {
-		logrus.Warnf("SHELL is not supported for OCI image format, %s will be ignored. Must use `docker` format", shell)
+		b.Logger.Warnf("SHELL is not supported for OCI image format, %s will be ignored. Must use `docker` format", shell)
 	}
 
-	b.Docker.Config.Shell = copyStringSlice(shell)
+	b.Docker.Config.Shell = slices.Clone(shell)
 }
 
 // Env returns a list of key-value pairs to be set when running commands in the
 // container, or in a container built using an image built from this container.
 func (b *Builder) Env() []string {
-	return copyStringSlice(b.OCIv1.Config.Env)
+	return slices.Clone(b.OCIv1.Config.Env)
 }
 
 // SetEnv adds or overwrites a value to the set of environment strings which
@@ -322,22 +445,22 @@ func (b *Builder) ClearEnv() {
 // set, to use when running a container built from an image built from this
 // container.
 func (b *Builder) Cmd() []string {
-	return copyStringSlice(b.OCIv1.Config.Cmd)
+	return slices.Clone(b.OCIv1.Config.Cmd)
 }
 
 // SetCmd sets the default command, or command parameters if an Entrypoint is
 // set, to use when running a container built from an image built from this
 // container.
 func (b *Builder) SetCmd(cmd []string) {
-	b.OCIv1.Config.Cmd = copyStringSlice(cmd)
-	b.Docker.Config.Cmd = copyStringSlice(cmd)
+	b.OCIv1.Config.Cmd = slices.Clone(cmd)
+	b.Docker.Config.Cmd = slices.Clone(cmd)
 }
 
 // Entrypoint returns the command to be run for containers built from images
 // built from this container.
 func (b *Builder) Entrypoint() []string {
 	if len(b.OCIv1.Config.Entrypoint) > 0 {
-		return copyStringSlice(b.OCIv1.Config.Entrypoint)
+		return slices.Clone(b.OCIv1.Config.Entrypoint)
 	}
 	return nil
 }
@@ -345,14 +468,14 @@ func (b *Builder) Entrypoint() []string {
 // SetEntrypoint sets the command to be run for in containers built from images
 // built from this container.
 func (b *Builder) SetEntrypoint(ep []string) {
-	b.OCIv1.Config.Entrypoint = copyStringSlice(ep)
-	b.Docker.Config.Entrypoint = copyStringSlice(ep)
+	b.OCIv1.Config.Entrypoint = slices.Clone(ep)
+	b.Docker.Config.Entrypoint = slices.Clone(ep)
 }
 
 // Labels returns a set of key-value pairs from the image's runtime
 // configuration.
 func (b *Builder) Labels() map[string]string {
-	return copyStringStringMap(b.OCIv1.Config.Labels)
+	return maps.Clone(b.OCIv1.Config.Labels)
 }
 
 // SetLabel adds or overwrites a key's value from the image's runtime
@@ -500,7 +623,7 @@ func (b *Builder) Domainname() string {
 // discarded when writing images using OCIv1 formats.
 func (b *Builder) SetDomainname(name string) {
 	if name != "" && b.Format != define.Dockerv2ImageManifest {
-		logrus.Warnf("DOMAINNAME is not supported for OCI image format, domainname %s will be ignored. Must use `docker` format", name)
+		b.Logger.Warnf("DOMAINNAME is not supported for OCI image format, domainname %s will be ignored. Must use `docker` format", name)
 	}
 	b.Docker.Config.Domainname = name
 }
@@ -559,11 +682,12 @@ func (b *Builder) Healthcheck() *docker.HealthConfig {
 		return nil
 	}
 	return &docker.HealthConfig{
-		Test:        copyStringSlice(b.Docker.Config.Healthcheck.Test),
-		Interval:    b.Docker.Config.Healthcheck.Interval,
-		Timeout:     b.Docker.Config.Healthcheck.Timeout,
-		StartPeriod: b.Docker.Config.Healthcheck.StartPeriod,
-		Retries:     b.Docker.Config.Healthcheck.Retries,
+		Test:          slices.Clone(b.Docker.Config.Healthcheck.Test),
+		Interval:      b.Docker.Config.Healthcheck.Interval,
+		Timeout:       b.Docker.Config.Healthcheck.Timeout,
+		StartPeriod:   b.Docker.Config.Healthcheck.StartPeriod,
+		StartInterval: b.Docker.Config.Healthcheck.StartInterval,
+		Retries:       b.Docker.Config.Healthcheck.Retries,
 	}
 }
 
@@ -577,14 +701,15 @@ func (b *Builder) SetHealthcheck(config *docker.HealthConfig) {
 	b.Docker.Config.Healthcheck = nil
 	if config != nil {
 		if b.Format != define.Dockerv2ImageManifest {
-			logrus.Warnf("Healthcheck is not supported for OCI image format and will be ignored. Must use `docker` format")
+			b.Logger.Warnf("HEALTHCHECK is not supported for OCI image format and will be ignored. Must use `docker` format")
 		}
 		b.Docker.Config.Healthcheck = &docker.HealthConfig{
-			Test:        copyStringSlice(config.Test),
-			Interval:    config.Interval,
-			Timeout:     config.Timeout,
-			StartPeriod: config.StartPeriod,
-			Retries:     config.Retries,
+			Test:          slices.Clone(config.Test),
+			Interval:      config.Interval,
+			Timeout:       config.Timeout,
+			StartPeriod:   config.StartPeriod,
+			StartInterval: config.StartInterval,
+			Retries:       config.Retries,
 		}
 	}
 }
@@ -634,4 +759,63 @@ func (b *Builder) AddAppendedEmptyLayer(created *time.Time, createdBy, author, c
 // to the committed image after the entry for the layer that we're adding.
 func (b *Builder) ClearAppendedEmptyLayers() {
 	b.AppendedEmptyLayers = nil
+}
+
+// AddPrependedLinkedLayer adds an item to the history that we'll create when
+// committing the image, optionally with a layer, after any history we inherit
+// from the base image, but before the history item that we'll use to describe
+// the new layer that we're adding.
+// The blobPath can be either the location of an uncompressed archive, or a
+// directory whose contents will be archived to use as a layer blob.  Leaving
+// blobPath empty is functionally similar to calling AddPrependedEmptyLayer().
+func (b *Builder) AddPrependedLinkedLayer(created *time.Time, createdBy, author, comment, blobPath string) {
+	if created != nil {
+		copiedTimestamp := *created
+		created = &copiedTimestamp
+	}
+	b.PrependedLinkedLayers = append(b.PrependedLinkedLayers, LinkedLayer{
+		BlobPath: blobPath,
+		History: ociv1.History{
+			Created:    created,
+			CreatedBy:  createdBy,
+			Author:     author,
+			Comment:    comment,
+			EmptyLayer: blobPath == "",
+		},
+	})
+}
+
+// ClearPrependedLinkedLayers clears the list of history entries that we'll add
+// the committed image before the layer that we're adding (if we're adding it).
+func (b *Builder) ClearPrependedLinkedLayers() {
+	b.PrependedLinkedLayers = nil
+}
+
+// AddAppendedLinkedLayer adds an item to the history that we'll create when
+// committing the image, optionally with a layer, after the history item that
+// we'll use to describe the new layer that we're adding.
+// The blobPath can be either the location of an uncompressed archive, or a
+// directory whose contents will be archived to use as a layer blob.  Leaving
+// blobPath empty is functionally similar to calling AddAppendedEmptyLayer().
+func (b *Builder) AddAppendedLinkedLayer(created *time.Time, createdBy, author, comment, blobPath string) {
+	if created != nil {
+		copiedTimestamp := *created
+		created = &copiedTimestamp
+	}
+	b.AppendedLinkedLayers = append(b.AppendedLinkedLayers, LinkedLayer{
+		BlobPath: blobPath,
+		History: ociv1.History{
+			Created:    created,
+			CreatedBy:  createdBy,
+			Author:     author,
+			Comment:    comment,
+			EmptyLayer: blobPath == "",
+		},
+	})
+}
+
+// ClearAppendedLinkedLayers clears the list of linked layers that we'll add to
+// the committed image after the layer that we're adding (if we're adding it).
+func (b *Builder) ClearAppendedLinkedLayers() {
+	b.AppendedLinkedLayers = nil
 }

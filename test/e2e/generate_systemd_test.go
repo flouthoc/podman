@@ -1,55 +1,30 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
-	"io/ioutil"
 	"os"
+	"path/filepath"
+	"strings"
 
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
 )
 
 var _ = Describe("Podman generate systemd", func() {
-	var (
-		tempdir    string
-		err        error
-		podmanTest *PodmanTestIntegration
-	)
-
-	BeforeEach(func() {
-		tempdir, err = CreateTempDirInTempDir()
-		if err != nil {
-			os.Exit(1)
-		}
-		podmanTest = PodmanTestCreate(tempdir)
-		podmanTest.Setup()
-		podmanTest.SeedImages()
-	})
-
-	AfterEach(func() {
-		podmanTest.Cleanup()
-		f := CurrentGinkgoTestDescription()
-		processTestResult(f)
-
-	})
 
 	It("podman generate systemd on bogus container/pod", func() {
 		session := podmanTest.Podman([]string{"generate", "systemd", "foobar"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError())
-	})
-
-	It("podman generate systemd bad restart policy", func() {
-		session := podmanTest.Podman([]string{"generate", "systemd", "--restart-policy", "never", "foobar"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError())
+		Expect(session).To(ExitWithError(125, `foobar does not refer to a container or pod: no pod with name or ID foobar found: no such pod: no container with name or ID "foobar" found: no such container`))
 	})
 
 	It("podman generate systemd bad timeout value", func() {
 		session := podmanTest.Podman([]string{"generate", "systemd", "--time", "-1", "foobar"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError())
+		Expect(session).To(ExitWithError(125, `invalid argument "-1" for "-t, --time" flag: strconv.ParseUint: parsing "-1": invalid syntax`))
 	})
 
 	It("podman generate systemd bad restart-policy value", func() {
@@ -59,8 +34,7 @@ var _ = Describe("Podman generate systemd", func() {
 
 		session = podmanTest.Podman([]string{"generate", "systemd", "--restart-policy", "bogus", "foobar"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError())
-		Expect(session.ErrorToString()).To(ContainSubstring("bogus is not a valid restart policy"))
+		Expect(session).To(ExitWithError(125, "bogus is not a valid restart policy"))
 	})
 
 	It("podman generate systemd with --no-header=true", func() {
@@ -108,11 +82,11 @@ var _ = Describe("Podman generate systemd", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(Exit(0))
 		Expect(session.OutputToString()).To(ContainSubstring("TimeoutStopSec=1294"))
-		Expect(session.OutputToString()).To(ContainSubstring(" stop -t 1234 "))
+		Expect(session.OutputToString()).To(ContainSubstring("-t 1234"))
 	})
 
 	It("podman generate systemd", func() {
-		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", nginx})
+		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", NGINX_IMAGE})
 		n.WaitWithDefaultTimeout()
 		Expect(n).Should(Exit(0))
 
@@ -125,7 +99,7 @@ var _ = Describe("Podman generate systemd", func() {
 	})
 
 	It("podman generate systemd --files --name", func() {
-		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", nginx})
+		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", NGINX_IMAGE})
 		n.WaitWithDefaultTimeout()
 		Expect(n).Should(Exit(0))
 
@@ -140,14 +114,68 @@ var _ = Describe("Podman generate systemd", func() {
 	})
 
 	It("podman generate systemd with timeout", func() {
-		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", nginx})
+		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", NGINX_IMAGE})
 		n.WaitWithDefaultTimeout()
 		Expect(n).Should(Exit(0))
 
 		session := podmanTest.Podman([]string{"generate", "systemd", "--time", "5", "nginx"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(Exit(0))
-		Expect(session.OutputToString()).To(ContainSubstring("podman stop -t 5"))
+		Expect(session.OutputToString()).To(ContainSubstring("TimeoutStopSec=65"))
+		Expect(session.OutputToString()).ToNot(ContainSubstring("TimeoutStartSec="))
+		Expect(session.OutputToString()).To(ContainSubstring("podman stop"))
+		Expect(session.OutputToString()).To(ContainSubstring("-t 5"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--stop-timeout", "5", "--start-timeout", "123", "nginx"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("TimeoutStartSec=123"))
+		Expect(session.OutputToString()).To(ContainSubstring("TimeoutStopSec=65"))
+		Expect(session.OutputToString()).To(ContainSubstring("-t 5"))
+	})
+
+	It("podman generate systemd with user-defined dependencies", func() {
+		n := podmanTest.Podman([]string{"run", "--name", "nginx", "-dt", NGINX_IMAGE})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		session := podmanTest.Podman([]string{"generate", "systemd", "--wants", "foobar.service", "nginx"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined Wants option
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=foobar.service"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--after", "foobar.service", "nginx"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined After option
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("After=foobar.service"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--requires", "foobar.service", "nginx"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined Requires option
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("Requires=foobar.service"))
+
+		session = podmanTest.Podman([]string{
+			"generate", "systemd",
+			"--wants", "foobar.service", "--wants", "barfoo.service",
+			"--after", "foobar.service", "--after", "barfoo.service",
+			"--requires", "foobar.service", "--requires", "barfoo.service", "nginx"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined Want, After, Requires options
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=foobar.service barfoo.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("After=foobar.service barfoo.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("Requires=foobar.service barfoo.service"))
 	})
 
 	It("podman generate systemd pod --name", func() {
@@ -168,19 +196,35 @@ var _ = Describe("Podman generate systemd", func() {
 		Expect(session).Should(Exit(0))
 
 		// Grepping the output (in addition to unit tests)
-		Expect(session.OutputToString()).To(ContainSubstring("# pod-foo.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("Requires=container-foo-1.service container-foo-2.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("# container-foo-1.service"))
-		Expect(session.OutputToString()).To(ContainSubstring(" start foo-1"))
-		Expect(session.OutputToString()).To(ContainSubstring("-infra")) // infra container
-		Expect(session.OutputToString()).To(ContainSubstring("# container-foo-2.service"))
-		Expect(session.OutputToString()).To(ContainSubstring(" stop -t 42 foo-2"))
-		Expect(session.OutputToString()).To(ContainSubstring("BindsTo=pod-foo.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("PIDFile="))
-		Expect(session.OutputToString()).To(ContainSubstring("/userdata/conmon.pid"))
-
+		output := session.OutputToString()
+		Expect(output).To(ContainSubstring("# pod-foo.service"))
+		Expect(output).To(ContainSubstring("Wants=container-foo-1.service container-foo-2.service"))
+		Expect(output).To(ContainSubstring("# container-foo-1.service"))
+		Expect(output).To(ContainSubstring(" start foo-1"))
+		Expect(output).To(ContainSubstring("-infra")) // infra container
+		Expect(output).To(ContainSubstring("# container-foo-2.service"))
+		Expect(output).To(ContainSubstring("podman stop"))
+		Expect(output).To(ContainSubstring("-t 42 foo-2"))
+		Expect(output).To(ContainSubstring("BindsTo=pod-foo.service"))
+		Expect(output).To(ContainSubstring("PIDFile="))
+		Expect(output).To(ContainSubstring("/userdata/conmon.pid"))
+		Expect(strings.Count(output, "RequiresMountsFor="+podmanTest.RunRoot)).To(Equal(3))
 		// The podman commands in the unit should not contain the root flags
-		Expect(session.OutputToString()).ToNot(ContainSubstring(" --runroot"))
+		Expect(output).ToNot(ContainSubstring(" --runroot"))
+
+		// Generating pod/container units for an init container is not
+		// supported (see #18585).
+		n = podmanTest.Podman([]string{"create", "--pod", "foo", "--init-ctr", "always", "--name", "foo-init", "alpine", "top"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+		// Fail for the pod
+		session = podmanTest.Podman([]string{"generate", "systemd", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, "cannot generate systemd units for init containers"))
+		// Fail for the init container
+		session = podmanTest.Podman([]string{"generate", "systemd", "foo-init"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, "cannot generate systemd units for init containers"))
 	})
 
 	It("podman generate systemd pod --name --files", func() {
@@ -202,6 +246,54 @@ var _ = Describe("Podman generate systemd", func() {
 
 		Expect(session.OutputToString()).To(ContainSubstring("/pod-foo.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("/container-foo-1.service"))
+	})
+
+	It("podman generate systemd pod with user-defined dependencies", func() {
+		n := podmanTest.Podman([]string{"pod", "create", "--name", "foo"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		n = podmanTest.Podman([]string{"create", "--pod", "foo", "--name", "foo-1", "alpine", "top"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		session := podmanTest.Podman([]string{"generate", "systemd", "--name", "--wants", "foobar.service", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined Wants option
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=foobar.service"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--name", "--after", "foobar.service", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined After option
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("After=foobar.service"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--name", "--requires", "foobar.service", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined Requires option
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("Requires=foobar.service"))
+
+		session = podmanTest.Podman([]string{
+			"generate", "systemd", "--name",
+			"--wants", "foobar.service", "--wants", "barfoo.service",
+			"--after", "foobar.service", "--after", "barfoo.service",
+			"--requires", "foobar.service", "--requires", "barfoo.service", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// The generated systemd unit should contain the User-defined Want, After, Requires options
+		Expect(session.OutputToString()).To(ContainSubstring("# User-defined dependencies"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=foobar.service barfoo.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("After=foobar.service barfoo.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("Requires=foobar.service barfoo.service"))
 	})
 
 	It("podman generate systemd --new --name foo", func() {
@@ -273,6 +365,28 @@ var _ = Describe("Podman generate systemd", func() {
 		Expect(session.OutputToString()).To(ContainSubstring(" pod create "))
 	})
 
+	It("podman generate systemd --restart-sec 15 --name foo", func() {
+		n := podmanTest.Podman([]string{"pod", "create", "--name", "foo"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		session := podmanTest.Podman([]string{"generate", "systemd", "--restart-sec", "15", "--name", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// Grepping the output (in addition to unit tests)
+		Expect(session.OutputToString()).To(ContainSubstring("RestartSec=15"))
+
+		n = podmanTest.Podman([]string{"create", "--name", "foocontainer", "alpine", "top"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		session2 := podmanTest.Podman([]string{"generate", "systemd", "--restart-sec", "15", "--name", "foocontainer"})
+		session2.WaitWithDefaultTimeout()
+		Expect(session2).Should(Exit(0))
+		Expect(session2.OutputToString()).To(ContainSubstring("RestartSec=15"))
+	})
+
 	It("podman generate systemd --new=false pod", func() {
 		n := podmanTest.Podman([]string{"pod", "create", "--name", "foo"})
 		n.WaitWithDefaultTimeout()
@@ -309,6 +423,20 @@ var _ = Describe("Podman generate systemd", func() {
 
 	})
 
+	It("podman generate systemd --container-prefix ''", func() {
+		n := podmanTest.Podman([]string{"create", "--name", "foo", "alpine", "top"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		session := podmanTest.Podman([]string{"generate", "systemd", "--name", "--container-prefix", "", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		// Grepping the output (in addition to unit tests)
+		Expect(session.OutputToString()).To(ContainSubstring("# foo.service"))
+
+	})
+
 	It("podman generate systemd --separator _", func() {
 		n := podmanTest.Podman([]string{"create", "--name", "foo", "alpine", "top"})
 		n.WaitWithDefaultTimeout()
@@ -341,7 +469,7 @@ var _ = Describe("Podman generate systemd", func() {
 
 		// Grepping the output (in addition to unit tests)
 		Expect(session.OutputToString()).To(ContainSubstring("# p-foo.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("Requires=container-foo-1.service container-foo-2.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=container-foo-1.service container-foo-2.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("# container-foo-1.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("BindsTo=p-foo.service"))
 	})
@@ -365,17 +493,52 @@ var _ = Describe("Podman generate systemd", func() {
 
 		// Grepping the output (in addition to unit tests)
 		Expect(session.OutputToString()).To(ContainSubstring("# p_foo.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("Requires=con_foo-1.service con_foo-2.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=con_foo-1.service con_foo-2.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("# con_foo-1.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("# con_foo-2.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("BindsTo=p_foo.service"))
 	})
 
+	It("podman generate systemd pod --pod-prefix '' --container-prefix '' --separator _ change all prefixes/separator", func() {
+		n := podmanTest.Podman([]string{"pod", "create", "--name", "foo"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		n = podmanTest.Podman([]string{"create", "--pod", "foo", "--name", "foo-1", "alpine", "top"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		n = podmanTest.Podman([]string{"create", "--pod", "foo", "--name", "foo-2", "alpine", "top"})
+		n.WaitWithDefaultTimeout()
+		Expect(n).Should(Exit(0))
+
+		// test systemd generate with empty pod prefix
+		session1 := podmanTest.Podman([]string{"generate", "systemd", "--pod-prefix", "", "--name", "foo"})
+		session1.WaitWithDefaultTimeout()
+		Expect(session1).Should(Exit(0))
+
+		// Grepping the output (in addition to unit tests)
+		Expect(session1.OutputToString()).To(ContainSubstring("# foo.service"))
+		Expect(session1.OutputToString()).To(ContainSubstring("Wants=container-foo-1.service container-foo-2.service"))
+		Expect(session1.OutputToString()).To(ContainSubstring("# container-foo-1.service"))
+		Expect(session1.OutputToString()).To(ContainSubstring("BindsTo=foo.service"))
+
+		// test systemd generate with empty container and pod prefix
+		session2 := podmanTest.Podman([]string{"generate", "systemd", "--container-prefix", "", "--pod-prefix", "", "--separator", "_", "--name", "foo"})
+		session2.WaitWithDefaultTimeout()
+		Expect(session2).Should(Exit(0))
+
+		// Grepping the output (in addition to unit tests)
+		Expect(session2.OutputToString()).To(ContainSubstring("# foo.service"))
+		Expect(session2.OutputToString()).To(ContainSubstring("Wants=foo-1.service foo-2.service"))
+		Expect(session2.OutputToString()).To(ContainSubstring("# foo-1.service"))
+		Expect(session2.OutputToString()).To(ContainSubstring("# foo-2.service"))
+		Expect(session2.OutputToString()).To(ContainSubstring("BindsTo=foo.service"))
+
+	})
+
 	It("podman generate systemd pod with containers --new", func() {
-		tmpDir, err := ioutil.TempDir("", "")
-		Expect(err).To(BeNil())
-		tmpFile := tmpDir + "podID"
-		defer os.RemoveAll(tmpDir)
+		tmpFile := filepath.Join(tempdir, "podID")
 
 		n := podmanTest.Podman([]string{"pod", "create", "--pod-id-file", tmpFile, "--name", "foo"})
 		n.WaitWithDefaultTimeout()
@@ -395,12 +558,21 @@ var _ = Describe("Podman generate systemd", func() {
 
 		// Grepping the output (in addition to unit tests)
 		Expect(session.OutputToString()).To(ContainSubstring("# pod-foo.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("Requires=container-foo-1.service container-foo-2.service"))
+		Expect(session.OutputToString()).To(ContainSubstring("Wants=container-foo-1.service container-foo-2.service"))
 		Expect(session.OutputToString()).To(ContainSubstring("BindsTo=pod-foo.service"))
-		Expect(session.OutputToString()).To(ContainSubstring("pod create --infra-conmon-pidfile %t/pod-foo.pid --pod-id-file %t/pod-foo.pod-id --name foo"))
-		Expect(session.OutputToString()).To(ContainSubstring("ExecStartPre=/bin/rm -f %t/pod-foo.pid %t/pod-foo.pod-id"))
-		Expect(session.OutputToString()).To(ContainSubstring("pod stop --ignore --pod-id-file %t/pod-foo.pod-id -t 10"))
-		Expect(session.OutputToString()).To(ContainSubstring("pod rm --ignore -f --pod-id-file %t/pod-foo.pod-id"))
+		Expect(session.OutputToString()).To(ContainSubstring("pod create"))
+		Expect(session.OutputToString()).To(ContainSubstring("--infra-conmon-pidfile %t/pod-foo.pid"))
+		Expect(session.OutputToString()).To(ContainSubstring("--pod-id-file %t/pod-foo.pod-id"))
+		Expect(session.OutputToString()).To(ContainSubstring("--exit-policy=stop"))
+		Expect(session.OutputToString()).To(ContainSubstring("--name foo"))
+		Expect(session.OutputToString()).To(ContainSubstring("pod stop"))
+		Expect(session.OutputToString()).To(ContainSubstring("--ignore"))
+		Expect(session.OutputToString()).To(ContainSubstring("--pod-id-file %t/pod-foo.pod-id"))
+		Expect(session.OutputToString()).To(ContainSubstring("-t 10"))
+		Expect(session.OutputToString()).To(ContainSubstring("pod rm"))
+		Expect(session.OutputToString()).To(ContainSubstring("--ignore"))
+		Expect(session.OutputToString()).To(ContainSubstring("-f"))
+		Expect(session.OutputToString()).To(ContainSubstring("--pod-id-file %t/pod-foo.pod-id"))
 	})
 
 	It("podman generate systemd --format json", func() {
@@ -411,10 +583,11 @@ var _ = Describe("Podman generate systemd", func() {
 		session := podmanTest.Podman([]string{"generate", "systemd", "--format", "json", "foo"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(Exit(0))
-		Expect(session.IsJSONOutputValid()).To(BeTrue())
+		Expect(session.OutputToString()).To(BeValidJSON())
 	})
 
 	It("podman generate systemd --new create command with double curly braces", func() {
+		SkipIfInContainer("journald inside a container doesn't work")
 		// Regression test for #9034
 		session := podmanTest.Podman([]string{"create", "--name", "foo", "--log-driver=journald", "--log-opt=tag={{.Name}}", ALPINE})
 		session.WaitWithDefaultTimeout()
@@ -433,5 +606,74 @@ var _ = Describe("Podman generate systemd", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(Exit(0))
 		Expect(session.OutputToString()).To(ContainSubstring(" --label key={{someval}}"))
+	})
+
+	It("podman generate systemd --env", func() {
+		session := podmanTest.RunTopContainer("test")
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "foo=bar", "-e", "hoge=fuga", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("Environment=foo=bar"))
+		Expect(session.OutputToString()).To(ContainSubstring("Environment=hoge=fuga"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "=bar", "-e", "hoge=fuga", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, "invalid variable"))
+
+		// Use -e/--env option with --new option
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "foo=bar", "-e", "hoge=fuga", "--new", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("Environment=foo=bar"))
+		Expect(session.OutputToString()).To(ContainSubstring("Environment=hoge=fuga"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "foo=bar", "-e", "=fuga", "--new", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, "invalid variable"))
+
+		// Escape systemd arguments
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "BAR=my test", "-e", "USER=%a", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("\"BAR=my test\""))
+		Expect(session.OutputToString()).To(ContainSubstring("USER=%%a"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "BAR=my test", "-e", "USER=%a", "--new", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("\"BAR=my test\""))
+		Expect(session.OutputToString()).To(ContainSubstring("USER=%%a"))
+
+		// Specify the environment variables without a value
+		os.Setenv("FOO1", "BAR1")
+		os.Setenv("FOO2", "BAR2")
+		os.Setenv("FOO3", "BAR3")
+		defer os.Unsetenv("FOO1")
+		defer os.Unsetenv("FOO2")
+		defer os.Unsetenv("FOO3")
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "FOO1", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR1"))
+		Expect(session.OutputToString()).NotTo(ContainSubstring("BAR2"))
+		Expect(session.OutputToString()).NotTo(ContainSubstring("BAR3"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "FOO*", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR1"))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR2"))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR3"))
+
+		session = podmanTest.Podman([]string{"generate", "systemd", "--env", "FOO*", "--new", "test"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(Exit(0))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR1"))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR2"))
+		Expect(session.OutputToString()).To(ContainSubstring("BAR3"))
 	})
 })

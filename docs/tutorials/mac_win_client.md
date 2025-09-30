@@ -1,5 +1,9 @@
 # Podman Remote clients for macOS and Windows
 
+***
+**_NOTE:_** For running Podman on Windows, refer to the [Podman for Windows](podman-for-windows.md) guide, which uses the recommended approach of a Podman-managed Linux backend. For Mac, see the [Podman installation instructions](https://podman.io/getting-started/installation). This guide covers the advanced usage of Podman with a custom Linux VM or a remote external Linux system.
+***
+
 ## Introduction
 
 The core Podman runtime environment can only run on Linux operating systems.  But other operating systems can use the “remote client” to manage their containers to a Linux backend.  This remote client is nearly identical to the standard Podman program.  Certain functions that do not make sense for remote clients have been removed.  For example, the “--latest” switch for container commands has been removed.
@@ -12,11 +16,11 @@ The remote client uses a client-server model. You need Podman installed on a Lin
 
 ### Windows
 
-Installing the Windows Podman client begins by downloading the Podman windows installer. The windows installer is built with each Podman release and is downloadable from its [release description page](https://github.com/containers/podman/releases/latest).  You can also build the installer from source using the `podman.msi` Makefile endpoint.
+Installing the Windows Podman client begins by downloading the Podman Windows installer. The Windows installer is built with each Podman release and is downloadable from its [release description page](https://github.com/containers/podman/releases/latest). The Windows installer file is named `podman-#.#.#-setup.exe`, where the `#` symbols represent the version number of Podman.
 
-Once you have downloaded the installer, simply double click the installer and Podman will be installed.  The path is also set to put `podman` in the default user path.
+Once you have downloaded the installer to your Windows host, simply double click the installer and Podman will be installed.  The path is also set to put `podman` in the default user path.
 
-Podman must be run at a command prompt using the Windows ‘cmd” or powershell applications.
+Podman must be run at a command prompt using the Windows Command Prompt (`cmd.exe`) or PowerShell (`pwsh.exe`) applications.
 
 ### macOS
 

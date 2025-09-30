@@ -1,3 +1,5 @@
+//go:build !remote
+
 package generate
 
 import (
@@ -103,12 +105,12 @@ func TestFilterCommonContainerFlags(t *testing.T) {
 		},
 		{
 			[]string{"podman", "run", "--cidfile", "foo", "alpine"},
-			[]string{"podman", "run", "--cidfile", "foo", "alpine"},
+			[]string{"podman", "run", "alpine"},
 			1,
 		},
 		{
 			[]string{"podman", "run", "--cidfile=foo", "alpine"},
-			[]string{"podman", "run", "--cidfile=foo", "alpine"},
+			[]string{"podman", "run", "alpine"},
 			1,
 		},
 		{
@@ -117,12 +119,12 @@ func TestFilterCommonContainerFlags(t *testing.T) {
 			1,
 		},
 		{
-			[]string{"podman", "run", "--cgroups=foo", "alpine"},
+			[]string{"podman", "run", "--cgroups=foo", "--restart=foo", "alpine"},
 			[]string{"podman", "run", "alpine"},
 			1,
 		},
 		{
-			[]string{"podman", "run", "--cgroups=foo", "--rm", "alpine"},
+			[]string{"podman", "run", "--cgroups=foo", "--rm", "--restart", "foo", "alpine"},
 			[]string{"podman", "run", "alpine"},
 			1,
 		},
@@ -146,7 +148,7 @@ func TestEscapeSystemdArguments(t *testing.T) {
 	}{
 		{
 			[]string{"foo", "bar=\"arg\""},
-			[]string{"foo", "bar=\"arg\""},
+			[]string{"foo", "\"bar=\\\"arg\\\"\""},
 		},
 		{
 			[]string{"foo", "bar=\"arg with space\""},
@@ -191,6 +193,22 @@ func TestEscapeSystemdArguments(t *testing.T) {
 		{
 			[]string{"foo", `command with two backslashes \\`},
 			[]string{"foo", `"command with two backslashes \\\\"`},
+		},
+		{
+			[]string{"podman", "create", "--entrypoint", "foo"},
+			[]string{"podman", "create", "--entrypoint", "foo"},
+		},
+		{
+			[]string{"podman", "create", "--entrypoint=foo"},
+			[]string{"podman", "create", "--entrypoint=foo"},
+		},
+		{
+			[]string{"podman", "create", "--entrypoint", "[\"foo\"]"},
+			[]string{"podman", "create", "--entrypoint", "\"[\\\"foo\\\"]\""},
+		},
+		{
+			[]string{"podman", "create", "--entrypoint", "[\"sh\", \"-c\", \"date '+%s'\"]"},
+			[]string{"podman", "create", "--entrypoint", "\"[\\\"sh\\\", \\\"-c\\\", \\\"date '+%%s'\\\"]\""},
 		},
 	}
 

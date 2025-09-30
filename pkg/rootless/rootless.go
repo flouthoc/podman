@@ -1,48 +1,51 @@
 package rootless
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"sync"
 
-	"github.com/containers/storage/pkg/lockfile"
-	"github.com/opencontainers/runc/libcontainer/user"
+	"github.com/moby/sys/user"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/lockfile"
 )
 
 // TryJoinPauseProcess attempts to join the namespaces of the pause PID via
 // TryJoinFromFilePaths.  If joining fails, it attempts to delete the specified
 // file.
 func TryJoinPauseProcess(pausePidPath string) (bool, int, error) {
-	if _, err := os.Stat(pausePidPath); err != nil {
-		return false, -1, nil
+	if err := fileutils.Exists(pausePidPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, -1, nil
+		}
+		return false, -1, err
 	}
 
-	became, ret, err := TryJoinFromFilePaths("", false, []string{pausePidPath})
+	became, ret, err := TryJoinFromFilePaths("", []string{pausePidPath})
 	if err == nil {
-		return became, ret, err
+		return became, ret, nil
 	}
 
 	// It could not join the pause process, let's lock the file before trying to delete it.
-	pidFileLock, err := lockfile.GetLockfile(pausePidPath)
+	pidFileLock, err := lockfile.GetLockFile(pausePidPath)
 	if err != nil {
 		// The file was deleted by another process.
 		if os.IsNotExist(err) {
 			return false, -1, nil
 		}
-		return false, -1, errors.Wrapf(err, "error acquiring lock on %s", pausePidPath)
+		return false, -1, fmt.Errorf("acquiring lock on %s: %w", pausePidPath, err)
 	}
 
 	pidFileLock.Lock()
 	defer func() {
-		if pidFileLock.Locked() {
-			pidFileLock.Unlock()
-		}
+		pidFileLock.Unlock()
 	}()
 
 	// Now the pause PID file is locked.  Try to join once again in case it changed while it was not locked.
-	became, ret, err = TryJoinFromFilePaths("", false, []string{pausePidPath})
+	became, ret, err = TryJoinFromFilePaths("", []string{pausePidPath})
 	if err != nil {
 		// It is still failing.  We can safely remove it.
 		os.Remove(pausePidPath)
@@ -111,17 +114,6 @@ func countAvailableIDs(mappings []user.IDMap) int64 {
 	return availableUids
 }
 
-// GetAvailableUids returns how many UIDs are available in the
-// current user namespace.
-func GetAvailableUids() (int64, error) {
-	uids, err := GetAvailableUIDMap()
-	if err != nil {
-		return -1, err
-	}
-
-	return countAvailableIDs(uids), nil
-}
-
 // GetAvailableGids returns how many GIDs are available in the
 // current user namespace.
 func GetAvailableGids() (int64, error) {
@@ -133,7 +125,7 @@ func GetAvailableGids() (int64, error) {
 	return countAvailableIDs(gids), nil
 }
 
-// findIDInMappings find the the mapping that contains the specified ID.
+// findIDInMappings find the mapping that contains the specified ID.
 // It assumes availableMappings is sorted by ID.
 func findIDInMappings(id int64, availableMappings []user.IDMap) *user.IDMap {
 	i := sort.Search(len(availableMappings), func(i int) bool {

@@ -2,18 +2,19 @@ package secrets
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -32,6 +33,8 @@ var (
 type listFlagType struct {
 	format    string
 	noHeading bool
+	filter    []string
+	quiet     bool
 }
 
 func init() {
@@ -41,17 +44,36 @@ func init() {
 	})
 
 	flags := lsCmd.Flags()
+
 	formatFlagName := "format"
-	flags.StringVar(&listFlag.format, formatFlagName, "{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.CreatedAt}}\t{{.UpdatedAt}}\t\n", "Format volume output using Go template")
-	_ = lsCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(entities.SecretInfoReport{}))
-	flags.BoolVar(&listFlag.noHeading, "noheading", false, "Do not print headers")
+	flags.StringVar(&listFlag.format, formatFlagName, "{{range .}}{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.CreatedAt}}\t{{.UpdatedAt}}\n{{end -}}", "Format volume output using Go template")
+	_ = lsCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.SecretInfoReport{}))
+
+	filterFlagName := "filter"
+	flags.StringArrayVarP(&listFlag.filter, filterFlagName, "f", []string{}, "Filter secret output")
+	_ = lsCmd.RegisterFlagCompletionFunc(filterFlagName, common.AutocompleteSecretFilters)
+
+	noHeadingFlagName := "noheading"
+	flags.BoolVarP(&listFlag.noHeading, noHeadingFlagName, "n", false, "Do not print headers")
+
+	quietFlagName := "quiet"
+	flags.BoolVarP(&listFlag.quiet, quietFlagName, "q", false, "Print secret IDs only")
 }
 
 func ls(cmd *cobra.Command, args []string) error {
-	responses, err := registry.ContainerEngine().SecretList(context.Background())
+	var err error
+	lsOpts := entities.SecretListRequest{}
+
+	lsOpts.Filters, err = parse.FilterArgumentsIntoFilters(listFlag.filter)
 	if err != nil {
 		return err
 	}
+
+	responses, err := registry.ContainerEngine().SecretList(context.Background(), lsOpts)
+	if err != nil {
+		return err
+	}
+
 	listed := make([]*entities.SecretListReport, 0, len(responses))
 	for _, response := range responses {
 		listed = append(listed, &entities.SecretListReport{
@@ -62,7 +84,19 @@ func ls(cmd *cobra.Command, args []string) error {
 			Driver:    response.Spec.Driver.Name,
 		})
 	}
+
+	if listFlag.quiet && !cmd.Flags().Changed("format") {
+		return quietOut(listed)
+	}
+
 	return outputTemplate(cmd, listed)
+}
+
+func quietOut(responses []*entities.SecretListReport) error {
+	for _, response := range responses {
+		fmt.Println(response.ID)
+	}
+	return nil
 }
 
 func outputTemplate(cmd *cobra.Command, responses []*entities.SecretListReport) error {
@@ -71,28 +105,25 @@ func outputTemplate(cmd *cobra.Command, responses []*entities.SecretListReport) 
 		"UpdatedAt": "UPDATED",
 	})
 
-	row := report.NormalizeFormat(listFlag.format)
-	format := report.EnforceRange(row)
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
 
-	tmpl, err := report.NewTemplate("list").Parse(format)
+	var err error
+	switch {
+	case cmd.Flag("format").Changed:
+		rpt, err = rpt.Parse(report.OriginUser, listFlag.format)
+	default:
+		rpt, err = rpt.Parse(report.OriginPodman, listFlag.format)
+	}
 	if err != nil {
 		return err
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
-	if cmd.Flags().Changed("format") && !report.HasTable(listFlag.format) {
-		listFlag.noHeading = true
-	}
-
-	if !listFlag.noHeading {
-		if err := tmpl.Execute(w, headers); err != nil {
-			return errors.Wrapf(err, "failed to write report column headers")
+	noHeading, _ := cmd.Flags().GetBool("noheading")
+	if rpt.RenderHeaders && !noHeading {
+		if err := rpt.Execute(headers); err != nil {
+			return fmt.Errorf("failed to write report column headers: %w", err)
 		}
 	}
-	return tmpl.Execute(w, responses)
+	return rpt.Execute(responses)
 }

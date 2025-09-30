@@ -1,23 +1,30 @@
+//go:build !remote
+
 package compat
 
 import (
+	"fmt"
 	"net/http"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/pkg/api/handlers"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
 )
 
 func HistoryImage(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	name := utils.GetName(r)
 
-	lookupOptions := &libimage.LookupImageOptions{IgnorePlatform: true}
-	newImage, _, err := runtime.LibimageRuntime().LookupImage(name, lookupOptions)
+	possiblyNormalizedName, err := utils.NormalizeToDockerHub(r, name)
 	if err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusNotFound, errors.Wrapf(err, "failed to find image %s", name))
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("normalizing image: %w", err))
+		return
+	}
+
+	newImage, _, err := runtime.LibimageRuntime().LookupImage(possiblyNormalizedName, nil)
+	if err != nil {
+		utils.ImageNotFound(w, possiblyNormalizedName, fmt.Errorf("failed to find image %s: %w", possiblyNormalizedName, err))
 		return
 	}
 	history, err := newImage.History(r.Context())
@@ -28,12 +35,16 @@ func HistoryImage(w http.ResponseWriter, r *http.Request) {
 	allHistory := make([]handlers.HistoryResponse, 0, len(history))
 	for _, h := range history {
 		l := handlers.HistoryResponse{
-			ID:        h.ID,
 			Created:   h.Created.Unix(),
 			CreatedBy: h.CreatedBy,
 			Tags:      h.Tags,
 			Size:      h.Size,
 			Comment:   h.Comment,
+		}
+		if utils.IsLibpodRequest(r) {
+			l.ID = h.ID
+		} else {
+			l.ID = "sha256:" + h.ID
 		}
 		allHistory = append(allHistory, l)
 	}

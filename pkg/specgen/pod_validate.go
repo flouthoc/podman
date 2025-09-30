@@ -1,33 +1,22 @@
 package specgen
 
 import (
-	"github.com/containers/podman/v3/pkg/rootless"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/pkg/errors"
+	"errors"
+	"fmt"
 )
 
 var (
 	// ErrInvalidPodSpecConfig describes an error given when the podspecgenerator is invalid
 	ErrInvalidPodSpecConfig = errors.New("invalid pod spec")
 	// containerConfig has the default configurations defined in containers.conf
-	containerConfig = util.DefaultContainerConfig()
 )
 
 func exclusivePodOptions(opt1, opt2 string) error {
-	return errors.Wrapf(ErrInvalidPodSpecConfig, "%s and %s are mutually exclusive pod options", opt1, opt2)
+	return fmt.Errorf("%s and %s are mutually exclusive pod options: %w", opt1, opt2, ErrInvalidPodSpecConfig)
 }
 
 // Validate verifies the input is valid
 func (p *PodSpecGenerator) Validate() error {
-	if rootless.IsRootless() && len(p.CNINetworks) == 0 {
-		if p.StaticIP != nil {
-			return ErrNoStaticIPRootless
-		}
-		if p.StaticMAC != nil {
-			return ErrNoStaticMACRootless
-		}
-	}
-
 	// PodBasicConfig
 	if p.NoInfra {
 		if len(p.InfraCommand) > 0 {
@@ -35,6 +24,9 @@ func (p *PodSpecGenerator) Validate() error {
 		}
 		if len(p.InfraImage) > 0 {
 			return exclusivePodOptions("NoInfra", "InfraImage")
+		}
+		if len(p.InfraName) > 0 {
+			return exclusivePodOptions("NoInfra", "InfraName")
 		}
 		if len(p.SharedNamespaces) > 0 {
 			return exclusivePodOptions("NoInfra", "SharedNamespaces")
@@ -49,11 +41,10 @@ func (p *PodSpecGenerator) Validate() error {
 		if p.NetNS.NSMode != Default && p.NetNS.NSMode != "" {
 			return errors.New("NoInfra and network modes cannot be used together")
 		}
-		if p.StaticIP != nil {
-			return exclusivePodOptions("NoInfra", "StaticIP")
-		}
-		if p.StaticMAC != nil {
-			return exclusivePodOptions("NoInfra", "StaticMAC")
+		// Note that networks might be set when --ip or --mac was set
+		// so we need to check that no networks are set without the infra
+		if len(p.Networks) > 0 {
+			return errors.New("cannot set networks options without infra container")
 		}
 		if len(p.DNSOption) > 0 {
 			return exclusivePodOptions("NoInfra", "DNSOption")
@@ -67,18 +58,19 @@ func (p *PodSpecGenerator) Validate() error {
 		if len(p.HostAdd) > 0 {
 			return exclusivePodOptions("NoInfra", "HostAdd")
 		}
+		if len(p.HostsFile) > 0 {
+			return exclusivePodOptions("NoInfra", "HostsFile")
+		}
 		if p.NoManageResolvConf {
 			return exclusivePodOptions("NoInfra", "NoManageResolvConf")
 		}
 	}
-	if p.NetNS.NSMode != "" && p.NetNS.NSMode != Bridge && p.NetNS.NSMode != Slirp && p.NetNS.NSMode != Default {
+	if p.NetNS.NSMode != "" && p.NetNS.NSMode != Bridge && p.NetNS.NSMode != Slirp && p.NetNS.NSMode != Pasta && p.NetNS.NSMode != Default {
 		if len(p.PortMappings) > 0 {
-			return errors.New("PortMappings can only be used with Bridge or slirp4netns networking")
-		}
-		if len(p.CNINetworks) > 0 {
-			return errors.New("CNINetworks can only be used with Bridge mode networking")
+			return errors.New("PortMappings can only be used with Bridge, slirp4netns, or pasta networking")
 		}
 	}
+
 	if p.NoManageResolvConf {
 		if len(p.DNSServer) > 0 {
 			return exclusivePodOptions("NoManageResolvConf", "DNSServer")
@@ -90,8 +82,13 @@ func (p *PodSpecGenerator) Validate() error {
 			return exclusivePodOptions("NoManageResolvConf", "DNSOption")
 		}
 	}
-	if p.NoManageHosts && len(p.HostAdd) > 0 {
-		return exclusivePodOptions("NoManageHosts", "HostAdd")
+	if p.NoManageHosts {
+		if len(p.HostAdd) > 0 {
+			return exclusivePodOptions("NoManageHosts", "HostAdd")
+		}
+		if len(p.HostsFile) > 0 {
+			return exclusivePodOptions("NoManageHosts", "HostsFile")
+		}
 	}
 
 	return nil

@@ -1,33 +1,49 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
-	"time"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/infra/abi"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/cgroups"
 )
 
-const DefaultStatsPeriod = 5 * time.Second
-
 func StatsContainer(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
-	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
+
+	// Check if service is running rootless (cheap check)
+	if rootless.IsRootless() {
+		// if so, then verify cgroup v2 available (more expensive check)
+		if isV2, _ := cgroups.IsCgroup2UnifiedMode(); !isV2 {
+			utils.Error(w, http.StatusConflict, errors.New("container stats resource only available for cgroup v2"))
+			return
+		}
+	}
 
 	query := struct {
 		Containers []string `schema:"containers"`
 		Stream     bool     `schema:"stream"`
+		Interval   int      `schema:"interval"`
+		All        bool     `schema:"all"`
 	}{
-		Stream: true,
+		Stream:   true,
+		Interval: 5,
+		All:      false,
 	}
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusBadRequest, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
@@ -36,7 +52,9 @@ func StatsContainer(w http.ResponseWriter, r *http.Request) {
 	containerEngine := abi.ContainerEngine{Libpod: runtime}
 
 	statsOptions := entities.ContainerStatsOptions{
-		Stream: query.Stream,
+		Stream:   query.Stream,
+		Interval: query.Interval,
+		All:      query.All,
 	}
 
 	// Stats will stop if the connection is closed.
@@ -46,18 +64,23 @@ func StatsContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write header and content type.
-	w.WriteHeader(http.StatusOK)
-	w.Header().Add("Content-Type", "application/json")
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-
-	// Setup JSON encoder for streaming.
+	wroteContent := false
+	// Set up JSON encoder for streaming.
 	coder := json.NewEncoder(w)
 	coder.SetEscapeHTML(true)
 
 	for stats := range statsChan {
+		if !wroteContent {
+			if stats.Error != nil {
+				utils.ContainerNotFound(w, "", stats.Error)
+				return
+			}
+			// Write header and content type.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			wroteContent = true
+		}
+
 		if err := coder.Encode(stats); err != nil {
 			// Note: even when streaming, the stats goroutine will
 			// be notified (and stop) as the connection will be

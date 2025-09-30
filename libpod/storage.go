@@ -1,17 +1,19 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"context"
+	"errors"
 	"time"
 
-	istorage "github.com/containers/image/v5/storage"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/idtools"
+	"github.com/containers/podman/v5/libpod/define"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	istorage "go.podman.io/image/v5/storage"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/idtools"
 )
 
 type storageService struct {
@@ -63,21 +65,17 @@ func (metadata *RuntimeContainerMetadata) SetMountLabel(mountLabel string) {
 	metadata.MountLabel = mountLabel
 }
 
-// CreateContainerStorage creates the storage end of things.  We already have the container spec created
+// CreateContainerStorage creates the storage end of things.  We already have the container spec created.
+// imageID and imageName must both be either empty or non-empty.
 // TO-DO We should be passing in an Image object in the future.
 func (r *storageService) CreateContainerStorage(ctx context.Context, systemContext *types.SystemContext, imageName, imageID, containerName, containerID string, options storage.ContainerOptions) (_ ContainerInfo, retErr error) {
 	var imageConfig *v1.Image
-	if imageName != "" {
-		var ref types.ImageReference
+	if imageID != "" {
 		if containerName == "" {
 			return ContainerInfo{}, define.ErrEmptyID
 		}
 		// Check if we have the specified image.
-		ref, err := istorage.Transport.ParseStoreReference(r.store, imageID)
-		if err != nil {
-			return ContainerInfo{}, err
-		}
-		img, err := istorage.Transport.GetStoreImage(r.store, ref)
+		ref, err := istorage.Transport.NewStoreReference(r.store, nil, imageID)
 		if err != nil {
 			return ContainerInfo{}, err
 		}
@@ -93,12 +91,6 @@ func (r *storageService) CreateContainerStorage(ctx context.Context, systemConte
 		if err != nil {
 			return ContainerInfo{}, err
 		}
-
-		// Update the image name and ID.
-		if imageName == "" && len(img.Names) > 0 {
-			imageName = img.Names[0]
-		}
-		imageID = img.ID
 	}
 
 	// Build metadata to store with the container.
@@ -118,22 +110,22 @@ func (r *storageService) CreateContainerStorage(ctx context.Context, systemConte
 
 	container, err := r.store.CreateContainer(containerID, names, imageID, "", string(mdata), &options)
 	if err != nil {
-		logrus.Debugf("failed to create container %s(%s): %v", metadata.ContainerName, containerID, err)
+		logrus.Debugf("Failed to create container %s(%s): %v", metadata.ContainerName, containerID, err)
 
 		return ContainerInfo{}, err
 	}
-	logrus.Debugf("created container %q", container.ID)
+	logrus.Debugf("Created container %q", container.ID)
 
 	// If anything fails after this point, we need to delete the incomplete
 	// container before returning.
 	defer func() {
 		if retErr != nil {
 			if err := r.store.DeleteContainer(container.ID); err != nil {
-				logrus.Infof("%v deleting partially-created container %q", err, container.ID)
+				logrus.Infof("Error deleting partially-created container %q: %v", container.ID, err)
 
 				return
 			}
-			logrus.Infof("deleted partially-created container %q", container.ID)
+			logrus.Infof("Deleted partially-created container %q", container.ID)
 		}
 	}()
 
@@ -155,17 +147,17 @@ func (r *storageService) CreateContainerStorage(ctx context.Context, systemConte
 	if err != nil {
 		return ContainerInfo{}, err
 	}
-	logrus.Debugf("container %q has work directory %q", container.ID, containerDir)
+	logrus.Debugf("Container %q has work directory %q", container.ID, containerDir)
 
 	containerRunDir, err := r.store.ContainerRunDirectory(container.ID)
 	if err != nil {
 		return ContainerInfo{}, err
 	}
-	logrus.Debugf("container %q has run directory %q", container.ID, containerRunDir)
+	logrus.Debugf("Container %q has run directory %q", container.ID, containerRunDir)
 
 	return ContainerInfo{
-		UIDMap:       options.UIDMap,
-		GIDMap:       options.GIDMap,
+		UIDMap:       container.UIDMap,
+		GIDMap:       container.GIDMap,
 		Dir:          containerDir,
 		RunDir:       containerRunDir,
 		Config:       imageConfig,
@@ -184,8 +176,12 @@ func (r *storageService) DeleteContainer(idOrName string) error {
 	}
 	err = r.store.DeleteContainer(container.ID)
 	if err != nil {
-		logrus.Debugf("failed to delete container %q: %v", container.ID, err)
-		return err
+		if errors.Is(err, storage.ErrNotAContainer) || errors.Is(err, storage.ErrContainerUnknown) {
+			logrus.Infof("Storage for container %s already removed", container.ID)
+		} else {
+			logrus.Debugf("Failed to delete container %q: %v", container.ID, err)
+			return err
+		}
 	}
 	return nil
 }
@@ -193,7 +189,7 @@ func (r *storageService) DeleteContainer(idOrName string) error {
 func (r *storageService) SetContainerMetadata(idOrName string, metadata RuntimeContainerMetadata) error {
 	mdata, err := json.Marshal(&metadata)
 	if err != nil {
-		logrus.Debugf("failed to encode metadata for %q: %v", idOrName, err)
+		logrus.Debugf("Failed to encode metadata for %q: %v", idOrName, err)
 		return err
 	}
 	return r.store.SetMetadata(idOrName, string(mdata))
@@ -214,7 +210,7 @@ func (r *storageService) GetContainerMetadata(idOrName string) (RuntimeContainer
 func (r *storageService) MountContainerImage(idOrName string) (string, error) {
 	container, err := r.store.Container(idOrName)
 	if err != nil {
-		if errors.Cause(err) == storage.ErrContainerUnknown {
+		if errors.Is(err, storage.ErrContainerUnknown) {
 			return "", define.ErrNoSuchCtr
 		}
 		return "", err
@@ -225,10 +221,10 @@ func (r *storageService) MountContainerImage(idOrName string) (string, error) {
 	}
 	mountPoint, err := r.store.Mount(container.ID, metadata.MountLabel)
 	if err != nil {
-		logrus.Debugf("failed to mount container %q: %v", container.ID, err)
+		logrus.Debugf("Failed to mount container %q: %v", container.ID, err)
 		return "", err
 	}
-	logrus.Debugf("mounted container %q at %q", container.ID, mountPoint)
+	logrus.Debugf("Mounted container %q at %q", container.ID, mountPoint)
 	return mountPoint, nil
 }
 
@@ -252,10 +248,10 @@ func (r *storageService) UnmountContainerImage(idOrName string, force bool) (boo
 	}
 	mounted, err := r.store.Unmount(container.ID, force)
 	if err != nil {
-		logrus.Debugf("failed to unmount container %q: %v", container.ID, err)
+		logrus.Debugf("Failed to unmount container %q: %v", container.ID, err)
 		return false, err
 	}
-	logrus.Debugf("unmounted container %q", container.ID)
+	logrus.Debugf("Unmounted container %q", container.ID)
 	return mounted, nil
 }
 
@@ -277,7 +273,7 @@ func (r *storageService) MountedContainerImage(idOrName string) (int, error) {
 func (r *storageService) GetMountpoint(id string) (string, error) {
 	container, err := r.store.Container(id)
 	if err != nil {
-		if errors.Cause(err) == storage.ErrContainerUnknown {
+		if errors.Is(err, storage.ErrContainerUnknown) {
 			return "", define.ErrNoSuchCtr
 		}
 		return "", err
@@ -293,7 +289,7 @@ func (r *storageService) GetMountpoint(id string) (string, error) {
 func (r *storageService) GetWorkDir(id string) (string, error) {
 	container, err := r.store.Container(id)
 	if err != nil {
-		if errors.Cause(err) == storage.ErrContainerUnknown {
+		if errors.Is(err, storage.ErrContainerUnknown) {
 			return "", define.ErrNoSuchCtr
 		}
 		return "", err
@@ -304,7 +300,7 @@ func (r *storageService) GetWorkDir(id string) (string, error) {
 func (r *storageService) GetRunDir(id string) (string, error) {
 	container, err := r.store.Container(id)
 	if err != nil {
-		if errors.Cause(err) == storage.ErrContainerUnknown {
+		if errors.Is(err, storage.ErrContainerUnknown) {
 			return "", define.ErrNoSuchCtr
 		}
 		return "", err

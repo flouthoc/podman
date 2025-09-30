@@ -1,24 +1,25 @@
-// +build linux,!remote
+//go:build (linux || freebsd) && !remote
 
 package system
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/rootless"
-	"github.com/containers/podman/v3/pkg/systemd"
-	"github.com/containers/podman/v3/pkg/util"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/rootless"
+	"github.com/containers/podman/v5/pkg/systemd"
+	"github.com/containers/podman/v5/pkg/util"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -35,12 +36,20 @@ Enable a listening service for API access to Podman commands.
 		Long:              srvDescription,
 		RunE:              service,
 		ValidArgsFunction: common.AutocompleteDefaultOneArg,
-		Example:           `podman system service --time=0 unix:///tmp/podman.sock`,
+		Example: `podman system service --time=0 unix:///tmp/podman.sock
+  podman system service --time=0 tcp://localhost:8888
+  podman system service --time=0 --tls-cert=tls.crt --tls-key=tls.key tcp://localhost:8888
+  podman system service --time=0 --tls-cert=tls.crt --tls-key=tls.key --tls-client-ca=ca.crt tcp://localhost:8888
+    `,
 	}
 
 	srvArgs = struct {
-		Timeout     int64
-		CorsHeaders string
+		CorsHeaders     string
+		PProfAddr       string
+		Timeout         uint
+		TLSCertFile     string
+		TLSKeyFile      string
+		TLSClientCAFile string
 	}{}
 )
 
@@ -51,14 +60,30 @@ func init() {
 	})
 
 	flags := srvCmd.Flags()
+	cfg := registry.PodmanConfig()
 
 	timeFlagName := "time"
-	flags.Int64VarP(&srvArgs.Timeout, timeFlagName, "t", 5, "Time until the service session expires in seconds.  Use 0 to disable the timeout")
+	flags.UintVarP(&srvArgs.Timeout, timeFlagName, "t", cfg.ContainersConfDefaultsRO.Engine.ServiceTimeout,
+		"Time until the service session expires in seconds.  Use 0 to disable the timeout")
 	_ = srvCmd.RegisterFlagCompletionFunc(timeFlagName, completion.AutocompleteNone)
+	flags.SetNormalizeFunc(aliasTimeoutFlag)
+
 	flags.StringVarP(&srvArgs.CorsHeaders, "cors", "", "", "Set CORS Headers")
 	_ = srvCmd.RegisterFlagCompletionFunc("cors", completion.AutocompleteNone)
 
-	flags.SetNormalizeFunc(aliasTimeoutFlag)
+	flags.StringVarP(&srvArgs.PProfAddr, "pprof-address", "", "",
+		"Binding network address for pprof profile endpoints, default: do not expose endpoints")
+	_ = flags.MarkHidden("pprof-address")
+
+	flags.StringVarP(&srvArgs.TLSCertFile, "tls-cert", "", "",
+		"PEM file containing TLS serving certificate.")
+	_ = srvCmd.RegisterFlagCompletionFunc("tls-cert", completion.AutocompleteDefault)
+	flags.StringVarP(&srvArgs.TLSKeyFile, "tls-key", "", "",
+		"PEM file containing TLS serving certificate private key")
+	_ = srvCmd.RegisterFlagCompletionFunc("tls-key", completion.AutocompleteDefault)
+	flags.StringVarP(&srvArgs.TLSClientCAFile, "tls-client-ca", "", "",
+		"Only trust client connections with certificates signed by this CA PEM file")
+	_ = srvCmd.RegisterFlagCompletionFunc("tls-client-ca", completion.AutocompleteDefault)
 }
 
 func aliasTimeoutFlag(_ *pflag.FlagSet, name string) pflag.NormalizedName {
@@ -73,7 +98,7 @@ func service(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	logrus.Infof("using API endpoint: '%s'", apiURI)
+
 	// Clean up any old existing unix domain socket
 	if len(apiURI) > 0 {
 		uri, err := url.Parse(apiURI)
@@ -91,38 +116,46 @@ func service(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	opts := entities.ServiceOptions{
-		URI:         apiURI,
-		Command:     cmd,
-		CorsHeaders: srvArgs.CorsHeaders,
+	if len(srvArgs.TLSCertFile) != 0 && len(srvArgs.TLSKeyFile) == 0 {
+		return fmt.Errorf("--tls-cert provided without --tls-key")
+	}
+	if len(srvArgs.TLSKeyFile) != 0 && len(srvArgs.TLSCertFile) == 0 {
+		return fmt.Errorf("--tls-key provided without --tls-cert")
 	}
 
-	opts.Timeout = time.Duration(srvArgs.Timeout) * time.Second
-	return restService(opts, cmd.Flags(), registry.PodmanConfig())
+	return restService(cmd.Flags(), registry.PodmanConfig(), entities.ServiceOptions{
+		CorsHeaders:     srvArgs.CorsHeaders,
+		PProfAddr:       srvArgs.PProfAddr,
+		Timeout:         time.Duration(srvArgs.Timeout) * time.Second,
+		URI:             apiURI,
+		TLSCertFile:     srvArgs.TLSCertFile,
+		TLSKeyFile:      srvArgs.TLSKeyFile,
+		TLSClientCAFile: srvArgs.TLSClientCAFile,
+	})
 }
 
-func resolveAPIURI(_url []string) (string, error) {
+func resolveAPIURI(uri []string) (string, error) {
 	// When determining _*THE*_ listening endpoint --
 	// 1) User input wins always
 	// 2) systemd socket activation
 	// 3) rootless honors XDG_RUNTIME_DIR
 	// 4) lastly adapter.DefaultAPIAddress
 
-	if len(_url) == 0 {
+	if len(uri) == 0 {
 		if v, found := os.LookupEnv("PODMAN_SOCKET"); found {
-			logrus.Debugf("PODMAN_SOCKET='%s' used to determine API endpoint", v)
-			_url = []string{v}
+			logrus.Debugf("PODMAN_SOCKET=%q used to determine API endpoint", v)
+			uri = []string{v}
 		}
 	}
 
 	switch {
-	case len(_url) > 0 && _url[0] != "":
-		return _url[0], nil
+	case len(uri) > 0 && uri[0] != "":
+		return uri[0], nil
 	case systemd.SocketActivated():
-		logrus.Info("using systemd socket activation to determine API endpoint")
+		logrus.Info("Using systemd socket activation to determine API endpoint")
 		return "", nil
 	case rootless.IsRootless():
-		xdg, err := util.GetRuntimeDir()
+		xdg, err := util.GetRootlessRuntimeDir()
 		if err != nil {
 			return "", err
 		}
@@ -132,7 +165,7 @@ func resolveAPIURI(_url []string) (string, error) {
 		if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
 			return "", err
 		}
-		return "unix:" + socketPath, nil
+		return "unix://" + socketPath, nil
 	default:
 		if err := os.MkdirAll(filepath.Dir(registry.DefaultRootAPIPath), 0700); err != nil {
 			return "", err

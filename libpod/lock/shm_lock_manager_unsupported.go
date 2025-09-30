@@ -1,4 +1,4 @@
-// +build !linux
+//go:build !linux
 
 package lock
 
@@ -31,4 +31,14 @@ func (m *SHMLockManager) RetrieveLock(id string) (Locker, error) {
 // FreeAllLocks is not supported on this platform
 func (m *SHMLockManager) FreeAllLocks() error {
 	return fmt.Errorf("not supported")
+}
+
+// AvailableLocks is not supported on this platform
+func (m *SHMLockManager) AvailableLocks() (*uint32, error) {
+	return nil, fmt.Errorf("not supported")
+}
+
+// LocksHeld is not supported on this platform
+func (m *SHMLockManager) LocksHeld() ([]uint32, error) {
+	return nil, fmt.Errorf("not supported")
 }

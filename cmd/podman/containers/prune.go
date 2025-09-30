@@ -7,13 +7,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/utils"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -45,7 +46,7 @@ func init() {
 	_ = pruneCommand.RegisterFlagCompletionFunc(filterFlagName, common.AutocompletePruneFilters)
 }
 
-func prune(cmd *cobra.Command, args []string) error {
+func prune(cmd *cobra.Command, _ []string) error {
 	var (
 		pruneOptions = entities.ContainerPruneOptions{}
 		err          error
@@ -63,7 +64,7 @@ func prune(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	pruneOptions.Filters, err = common.ParseFilters(filter)
+	pruneOptions.Filters, err = parse.FilterArgumentsIntoFilters(filter)
 	if err != nil {
 		return err
 	}

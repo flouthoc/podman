@@ -1,26 +1,23 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/rootless"
-	"github.com/containers/storage/pkg/stringid"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
+	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 // Creates a new, empty pod
 func newPod(runtime *Runtime) *Pod {
 	pod := new(Pod)
 	pod.config = new(PodConfig)
-	pod.config.ID = stringid.GenerateNonCryptoID()
+	pod.config.ID = stringid.GenerateRandomID()
 	pod.config.Labels = make(map[string]string)
 	pod.config.CreatedTime = time.Now()
-	pod.config.InfraContainer = new(InfraContainerConfig)
+	//	pod.config.InfraContainer = new(ContainerConfig)
 	pod.state = new(podState)
 	pod.runtime = runtime
 
@@ -39,7 +36,7 @@ func (p *Pod) updatePod() error {
 // Save pod state to database
 func (p *Pod) save() error {
 	if err := p.runtime.state.SavePod(p); err != nil {
-		return errors.Wrapf(err, "error saving pod %s state", p.ID())
+		return fmt.Errorf("saving pod %s state: %w", p.ID(), err)
 	}
 
 	return nil
@@ -49,7 +46,7 @@ func (p *Pod) save() error {
 // This cannot lock any other pod, but may lock individual containers, as those
 // will have refreshed by the time pod refresh runs.
 func (p *Pod) refresh() error {
-	// Need to to an update from the DB to pull potentially-missing state
+	// Need to do an update from the DB to pull potentially-missing state
 	if err := p.runtime.state.UpdatePod(p); err != nil {
 		return err
 	}
@@ -61,30 +58,21 @@ func (p *Pod) refresh() error {
 	// Retrieve the pod's lock
 	lock, err := p.runtime.lockManager.AllocateAndRetrieveLock(p.config.LockID)
 	if err != nil {
-		return errors.Wrapf(err, "error retrieving lock %d for pod %s", p.config.LockID, p.ID())
+		return fmt.Errorf("retrieving lock %d for pod %s: %w", p.config.LockID, p.ID(), err)
 	}
 	p.lock = lock
 
-	// We need to recreate the pod's cgroup
-	if p.config.UsePodCgroup {
-		switch p.runtime.config.Engine.CgroupManager {
-		case config.SystemdCgroupsManager:
-			cgroupPath, err := systemdSliceFromPath(p.config.CgroupParent, fmt.Sprintf("libpod_pod_%s", p.ID()))
-			if err != nil {
-				logrus.Errorf("Error creating CGroup for pod %s: %v", p.ID(), err)
-			}
-			p.state.CgroupPath = cgroupPath
-		case config.CgroupfsCgroupsManager:
-			if rootless.IsRootless() && isRootlessCgroupSet(p.config.CgroupParent) {
-				p.state.CgroupPath = filepath.Join(p.config.CgroupParent, p.ID())
-
-				logrus.Debugf("setting pod cgroup to %s", p.state.CgroupPath)
-			}
-		default:
-			return errors.Wrapf(define.ErrInvalidArg, "unknown cgroups manager %s specified", p.runtime.config.Engine.CgroupManager)
-		}
+	if err := p.platformRefresh(); err != nil {
+		return err
 	}
 
 	// Save changes
 	return p.save()
+}
+
+// resetPodState resets state fields to default values.
+// It is performed before a refresh and clears the state after a reboot.
+// It does not save the results - assumes the database will do that for us.
+func resetPodState(state *podState) {
+	state.CgroupPath = ""
 }

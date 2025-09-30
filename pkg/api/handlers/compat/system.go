@@ -1,20 +1,28 @@
+//go:build !remote
+
 package compat
 
 import (
 	"net/http"
 	"strings"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/pkg/api/handlers"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/infra/abi"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils/apiutil"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 	docker "github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/build"
+	"github.com/docker/docker/api/types/container"
+	dockerImage "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/volume"
 )
 
 func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 	options := entities.SystemDfOptions{}
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	ic := abi.ContainerEngine{Libpod: runtime}
 	df, err := ic.SystemDf(r.Context(), options)
 	if err != nil {
@@ -22,9 +30,9 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imgs := make([]*docker.ImageSummary, len(df.Images))
+	imgs := make([]*dockerImage.Summary, len(df.Images))
 	for i, o := range df.Images {
-		t := docker.ImageSummary{
+		t := dockerImage.Summary{
 			Containers:  int64(o.Containers),
 			Created:     o.Created.Unix(),
 			ID:          o.ImageID,
@@ -34,14 +42,18 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 			RepoTags:    []string{o.Tag},
 			SharedSize:  o.SharedSize,
 			Size:        o.Size,
-			VirtualSize: o.Size - o.UniqueSize,
 		}
+
+		if _, err := apiutil.SupportedVersion(r, "<1.44.0"); err == nil {
+			t.VirtualSize = o.Size - o.UniqueSize //nolint:staticcheck // Deprecated field
+		}
+
 		imgs[i] = &t
 	}
 
-	ctnrs := make([]*docker.Container, len(df.Containers))
+	ctnrs := make([]*container.Summary, len(df.Containers))
 	for i, o := range df.Containers {
-		t := docker.Container{
+		t := container.Summary{
 			ID:         o.ContainerID,
 			Names:      []string{o.Names},
 			Image:      o.Image,
@@ -55,7 +67,8 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 			State:      o.Status,
 			Status:     o.Status,
 			HostConfig: struct {
-				NetworkMode string `json:",omitempty"`
+				NetworkMode string            `json:",omitempty"`
+				Annotations map[string]string `json:",omitempty"`
 			}{},
 			NetworkSettings: nil,
 			Mounts:          nil,
@@ -63,9 +76,9 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 		ctnrs[i] = &t
 	}
 
-	vols := make([]*docker.Volume, len(df.Volumes))
+	vols := make([]*volume.Volume, len(df.Volumes))
 	for i, o := range df.Volumes {
-		t := docker.Volume{
+		t := volume.Volume{
 			CreatedAt:  "",
 			Driver:     "",
 			Labels:     map[string]string{},
@@ -74,8 +87,8 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 			Options:    nil,
 			Scope:      "local",
 			Status:     nil,
-			UsageData: &docker.VolumeUsageData{
-				RefCount: 1,
+			UsageData: &volume.UsageData{
+				RefCount: int64(o.Links),
 				Size:     o.Size,
 			},
 		}
@@ -83,11 +96,13 @@ func GetDiskUsage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.WriteResponse(w, http.StatusOK, handlers.DiskUsage{DiskUsage: docker.DiskUsage{
-		LayersSize:  0,
-		Images:      imgs,
-		Containers:  ctnrs,
-		Volumes:     vols,
-		BuildCache:  []*docker.BuildCache{},
-		BuilderSize: 0,
+		// BuilderSize was explicitly omitted since Docker deprecated its in ver 1.42
+		// and suggests to use BuildCache.
+		// https://docs.docker.com/reference/api/engine/version-history/#v142-api-changes
+		LayersSize: df.ImagesSize,
+		Images:     imgs,
+		Containers: ctnrs,
+		Volumes:    vols,
+		BuildCache: []*build.CacheRecord{},
 	}})
 }

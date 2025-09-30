@@ -1,33 +1,34 @@
+//go:build !remote
+
 package compat
 
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/api/handlers"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/domain/filters"
-	"github.com/containers/podman/v3/pkg/domain/infra/abi/parse"
-	"github.com/containers/podman/v3/pkg/util"
-	docker_api_types "github.com/docker/docker/api/types"
-	docker_api_types_volume "github.com/docker/docker/api/types/volume"
-	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/api/handlers"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/domain/filters"
+	"github.com/containers/podman/v5/pkg/domain/infra/abi/parse"
+	"github.com/containers/podman/v5/pkg/util"
+	"github.com/docker/docker/api/types/volume"
 )
 
 func ListVolumes(w http.ResponseWriter, r *http.Request) {
-	var (
-		runtime = r.Context().Value("runtime").(*libpod.Runtime)
-	)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+
 	filtersMap, err := util.PrepareFilters(r)
 	if err != nil {
-		utils.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError,
-			errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusInternalServerError,
+			fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
@@ -35,15 +36,19 @@ func ListVolumes(w http.ResponseWriter, r *http.Request) {
 	// happily parse them for us.
 	for filter := range *filtersMap {
 		if filter == "opts" {
-			utils.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError,
-				errors.Errorf("unsupported libpod filters passed to docker endpoint"))
+			utils.Error(w, http.StatusInternalServerError,
+				fmt.Errorf("unsupported libpod filters passed to docker endpoint"))
 			return
 		}
 	}
-	volumeFilters, err := filters.GenerateVolumeFilters(*filtersMap)
-	if err != nil {
-		utils.InternalServerError(w, err)
-		return
+
+	volumeFilters := []libpod.VolumeFilter{}
+	for filter, filterValues := range *filtersMap {
+		filterFunc, err := filters.GenerateVolumeFilters(filter, filterValues, runtime)
+		if err != nil {
+			utils.InternalServerError(w, err)
+		}
+		volumeFilters = append(volumeFilters, filterFunc)
 	}
 
 	vols, err := runtime.Volumes(volumeFilters...)
@@ -51,14 +56,17 @@ func ListVolumes(w http.ResponseWriter, r *http.Request) {
 		utils.InternalServerError(w, err)
 		return
 	}
-	volumeConfigs := make([]*docker_api_types.Volume, 0, len(vols))
+	volumeConfigs := make([]*volume.Volume, 0, len(vols))
 	for _, v := range vols {
 		mp, err := v.MountPoint()
 		if err != nil {
+			if errors.Is(err, define.ErrNoSuchVolume) {
+				continue
+			}
 			utils.InternalServerError(w, err)
 			return
 		}
-		config := docker_api_types.Volume{
+		config := volume.Volume{
 			Name:       v.Name(),
 			Driver:     v.Driver(),
 			Mountpoint: mp,
@@ -69,7 +77,7 @@ func ListVolumes(w http.ResponseWriter, r *http.Request) {
 		}
 		volumeConfigs = append(volumeConfigs, &config)
 	}
-	response := docker_api_types_volume.VolumeListOKBody{
+	response := volume.ListResponse{
 		Volumes:  volumeConfigs,
 		Warnings: []string{},
 	}
@@ -79,20 +87,20 @@ func ListVolumes(w http.ResponseWriter, r *http.Request) {
 func CreateVolume(w http.ResponseWriter, r *http.Request) {
 	var (
 		volumeOptions []libpod.VolumeCreateOption
-		runtime       = r.Context().Value("runtime").(*libpod.Runtime)
-		decoder       = r.Context().Value("decoder").(*schema.Decoder)
+		runtime       = r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+		decoder       = utils.GetDecoder(r)
 	)
 	/* No query string data*/
 	query := struct{}{}
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError,
-			errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusInternalServerError,
+			fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 	// decode params from body
-	input := docker_api_types_volume.VolumeCreateBody{}
+	input := volume.CreateOptions{}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusInternalServerError, errors.Wrap(err, "Decode()"))
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("Decode(): %w", err))
 		return
 	}
 
@@ -101,9 +109,9 @@ func CreateVolume(w http.ResponseWriter, r *http.Request) {
 		err            error
 	)
 	if len(input.Name) != 0 {
-		// See if the volume exists already
+		// See if the volume already exists
 		existingVolume, err = runtime.GetVolume(input.Name)
-		if err != nil && errors.Cause(err) != define.ErrNoSuchVolume {
+		if err != nil && !errors.Is(err, define.ErrNoSuchVolume) {
 			utils.InternalServerError(w, err)
 			return
 		}
@@ -117,7 +125,7 @@ func CreateVolume(w http.ResponseWriter, r *http.Request) {
 			utils.InternalServerError(w, err)
 			return
 		}
-		response := docker_api_types.Volume{
+		response := volume.Volume{
 			CreatedAt:  existingVolume.CreatedTime().Format(time.RFC3339),
 			Driver:     existingVolume.Driver(),
 			Labels:     existingVolume.Labels(),
@@ -162,7 +170,7 @@ func CreateVolume(w http.ResponseWriter, r *http.Request) {
 		utils.InternalServerError(w, err)
 		return
 	}
-	volResponse := docker_api_types.Volume{
+	volResponse := volume.Volume{
 		Name:       config.Name,
 		Driver:     config.Driver,
 		Mountpoint: mp,
@@ -180,9 +188,7 @@ func CreateVolume(w http.ResponseWriter, r *http.Request) {
 }
 
 func InspectVolume(w http.ResponseWriter, r *http.Request) {
-	var (
-		runtime = r.Context().Value("runtime").(*libpod.Runtime)
-	)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	name := utils.GetName(r)
 	vol, err := runtime.GetVolume(name)
 	if err != nil {
@@ -194,7 +200,7 @@ func InspectVolume(w http.ResponseWriter, r *http.Request) {
 		utils.InternalServerError(w, err)
 		return
 	}
-	volResponse := docker_api_types.Volume{
+	volResponse := volume.Volume{
 		Name:       vol.Name(),
 		Driver:     vol.Driver(),
 		Mountpoint: mp,
@@ -209,23 +215,24 @@ func InspectVolume(w http.ResponseWriter, r *http.Request) {
 
 func RemoveVolume(w http.ResponseWriter, r *http.Request) {
 	var (
-		runtime = r.Context().Value("runtime").(*libpod.Runtime)
-		decoder = r.Context().Value("decoder").(*schema.Decoder)
+		runtime = r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+		decoder = utils.GetDecoder(r)
 	)
 	query := struct {
-		Force bool `schema:"force"`
+		Force   bool  `schema:"force"`
+		Timeout *uint `schema:"timeout"`
 	}{
 		// override any golang type defaults
 	}
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError,
-			errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusInternalServerError,
+			fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
 	/* The implications for `force` differ between Docker and us, so we can't
-	 * simply pass the `force` parameter to `runeimt.RemoveVolume()`.
+	 * simply pass the `force` parameter to `runtime.RemoveVolume()`.
 	 * Specifically, Docker's behavior seems to be that `force` means "do not
 	 * error on missing volume"; ours means "remove any not-running containers
 	 * using the volume at the same time".
@@ -239,9 +246,9 @@ func RemoveVolume(w http.ResponseWriter, r *http.Request) {
 	vol, err := runtime.LookupVolume(name)
 	if err == nil {
 		// As above, we do not pass `force` from the query parameters here
-		if err := runtime.RemoveVolume(r.Context(), vol, false); err != nil {
-			if errors.Cause(err) == define.ErrVolumeBeingUsed {
-				utils.Error(w, "volumes being used", http.StatusConflict, err)
+		if err := runtime.RemoveVolume(r.Context(), vol, false, query.Timeout); err != nil {
+			if errors.Is(err, define.ErrVolumeBeingUsed) {
+				utils.Error(w, http.StatusConflict, err)
 			} else {
 				utils.InternalServerError(w, err)
 			}
@@ -262,20 +269,22 @@ func RemoveVolume(w http.ResponseWriter, r *http.Request) {
 }
 
 func PruneVolumes(w http.ResponseWriter, r *http.Request) {
-	var (
-		runtime = r.Context().Value("runtime").(*libpod.Runtime)
-	)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	filterMap, err := util.PrepareFilters(r)
 	if err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusInternalServerError, errors.Wrap(err, "Decode()"))
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("Decode(): %w", err))
 		return
 	}
 
 	f := (url.Values)(*filterMap)
-	filterFuncs, err := filters.GeneratePruneVolumeFilters(f)
-	if err != nil {
-		utils.Error(w, "Something when wrong.", http.StatusInternalServerError, errors.Wrapf(err, "failed to parse filters for %s", f.Encode()))
-		return
+	filterFuncs := []libpod.VolumeFilter{}
+	for filter, filterValues := range f {
+		filterFunc, err := filters.GeneratePruneVolumeFilters(filter, filterValues, runtime)
+		if err != nil {
+			utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to parse filters for %s: %w", f.Encode(), err))
+			return
+		}
+		filterFuncs = append(filterFuncs, filterFunc)
 	}
 
 	pruned, err := runtime.PruneVolumes(r.Context(), filterFuncs)
@@ -302,7 +311,7 @@ func PruneVolumes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := handlers.VolumesPruneReport{
-		VolumesPruneReport: docker_api_types.VolumesPruneReport{
+		PruneReport: volume.PruneReport{
 			VolumesDeleted: prunedIds,
 			SpaceReclaimed: reclaimedSpace,
 		},

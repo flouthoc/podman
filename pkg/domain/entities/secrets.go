@@ -1,66 +1,46 @@
 package entities
 
 import (
-	"time"
-
-	"github.com/containers/podman/v3/pkg/errorhandling"
+	"github.com/containers/podman/v5/pkg/domain/entities/types"
+	"github.com/containers/podman/v5/pkg/errorhandling"
 )
 
-type SecretCreateReport struct {
-	ID string
-}
+type SecretCreateReport = types.SecretCreateReport
 
 type SecretCreateOptions struct {
 	Driver     string
 	DriverOpts map[string]string
+	Labels     map[string]string
+	Replace    bool
+	Ignore     bool
+}
+
+type SecretInspectOptions struct {
+	ShowSecret bool
 }
 
 type SecretListRequest struct {
-	Filters map[string]string
+	Filters map[string][]string
 }
 
-type SecretListReport struct {
-	ID        string
-	Name      string
-	Driver    string
-	CreatedAt string
-	UpdatedAt string
-}
+type SecretListReport = types.SecretListReport
 
 type SecretRmOptions struct {
-	All bool
+	All    bool
+	Ignore bool
 }
 
-type SecretRmReport struct {
-	ID  string
-	Err error
-}
+type SecretRmReport = types.SecretRmReport
 
-type SecretInfoReport struct {
-	ID        string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Spec      SecretSpec
-}
+type SecretInfoReport = types.SecretInfoReport
 
-type SecretInfoReportCompat struct {
-	SecretInfoReport
-	Version SecretVersion
-}
+type SecretInfoReportCompat = types.SecretInfoReportCompat
 
-type SecretVersion struct {
-	Index int
-}
+type SecretVersion = types.SecretVersion
 
-type SecretSpec struct {
-	Name   string
-	Driver SecretDriverSpec
-}
+type SecretSpec = types.SecretSpec
 
-type SecretDriverSpec struct {
-	Name    string
-	Options map[string]string
-}
+type SecretDriverSpec = types.SecretDriverSpec
 
 // swagger:model SecretCreate
 type SecretCreateRequest struct {
@@ -70,6 +50,8 @@ type SecretCreateRequest struct {
 	Data string
 	// Driver represents a driver (default "file")
 	Driver SecretDriverSpec
+	// Labels are labels on the secret
+	Labels map[string]string
 }
 
 // Secret create response

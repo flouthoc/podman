@@ -1,17 +1,13 @@
-// +build !remote
+//go:build !remote
 
 package system
 
 import (
-	"fmt"
-	"os"
-
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/infra"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -22,12 +18,15 @@ var (
 `
 
 	migrateCommand = &cobra.Command{
-		Annotations:       map[string]string{registry.EngineMode: registry.ABIMode},
+		Annotations: map[string]string{
+			registry.EngineMode:    registry.ABIMode,
+			registry.NoMoveProcess: registry.NoMoveProcess,
+		},
 		Use:               "migrate [options]",
 		Args:              validate.NoArgs,
 		Short:             "Migrate containers",
 		Long:              migrateDescription,
-		Run:               migrate,
+		RunE:              migrate,
 		ValidArgsFunction: completion.AutocompleteNone,
 	}
 )
@@ -49,22 +48,6 @@ func init() {
 	_ = migrateCommand.RegisterFlagCompletionFunc(newRuntimeFlagName, completion.AutocompleteNone)
 }
 
-func migrate(cmd *cobra.Command, args []string) {
-	// Shutdown all running engines, `renumber` will hijack repository
-	registry.ContainerEngine().Shutdown(registry.Context())
-	registry.ImageEngine().Shutdown(registry.Context())
-
-	engine, err := infra.NewSystemEngine(entities.MigrateMode, registry.PodmanConfig())
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(125)
-	}
-	defer engine.Shutdown(registry.Context())
-
-	err = engine.Migrate(registry.Context(), cmd.Flags(), registry.PodmanConfig(), migrateOptions)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(125)
-	}
-	os.Exit(0)
+func migrate(cmd *cobra.Command, args []string) error {
+	return registry.ContainerEngine().Migrate(registry.Context(), migrateOptions)
 }

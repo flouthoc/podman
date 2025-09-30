@@ -6,13 +6,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/utils"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/utils"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
@@ -35,11 +36,18 @@ var (
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
 		Command: pruneCmd,
+		Parent:  buildxCmd,
+	})
+
+	registry.Commands = append(registry.Commands, registry.CliCommand{
+		Command: pruneCmd,
 		Parent:  imageCmd,
 	})
 
 	flags := pruneCmd.Flags()
 	flags.BoolVarP(&pruneOpts.All, "all", "a", false, "Remove all images not in use by containers, not just dangling ones")
+	flags.BoolVarP(&pruneOpts.BuildCache, "build-cache", "", false, "Remove persistent build cache created by --mount=type=cache")
+	flags.BoolVarP(&pruneOpts.External, "external", "", false, "Remove images even when they are used by external containers (e.g., by build containers)")
 	flags.BoolVarP(&force, "force", "f", false, "Do not prompt for confirmation")
 
 	filterFlagName := "filter"
@@ -59,7 +67,7 @@ func prune(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 	}
-	filterMap, err := common.ParseFilters(filter)
+	filterMap, err := parse.FilterArgumentsIntoFilters(filter)
 	if err != nil {
 		return err
 	}
@@ -68,7 +76,7 @@ func prune(cmd *cobra.Command, args []string) error {
 			pruneOpts.Filter = append(pruneOpts.Filter, fmt.Sprintf("%s=%s", k, val))
 		}
 	}
-	results, err := registry.ImageEngine().Prune(registry.GetContext(), pruneOpts)
+	results, err := registry.ImageEngine().Prune(registry.Context(), pruneOpts)
 	if err != nil {
 		return err
 	}
@@ -79,7 +87,7 @@ func prune(cmd *cobra.Command, args []string) error {
 func createPruneWarningMessage(pruneOpts entities.ImagePruneOptions) string {
 	question := "Are you sure you want to continue? [y/N] "
 	if pruneOpts.All {
-		return "WARNING! This will remove all images without at least one container associated to them.\n" + question
+		return "WARNING! This command removes all images without at least one container associated with them.\n" + question
 	}
-	return "WARNING! This will remove all dangling images.\n" + question
+	return "WARNING! This command removes all dangling images.\n" + question
 }

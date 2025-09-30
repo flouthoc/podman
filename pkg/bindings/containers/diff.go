@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/storage/pkg/archive"
+	"github.com/containers/podman/v5/pkg/bindings"
+	"go.podman.io/storage/pkg/archive"
 )
 
 // Diff provides the changes between two container layers
@@ -22,10 +22,12 @@ func Diff(ctx context.Context, nameOrID string, options *DiffOptions) ([]archive
 	if err != nil {
 		return nil, err
 	}
-	response, err := conn.DoRequest(nil, http.MethodGet, "/containers/%s/changes", params, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/containers/%s/changes", params, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	var changes []archive.Change
 	return changes, response.Process(&changes)
 }

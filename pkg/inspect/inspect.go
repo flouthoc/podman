@@ -3,13 +3,13 @@ package inspect
 import (
 	"time"
 
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/podman/v3/libpod/define"
+	"github.com/containers/podman/v5/libpod/define"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"go.podman.io/image/v5/manifest"
 )
 
-// ImageData holds the inspect information of an image
+// ImageData holds the inspect information of an image.
 type ImageData struct {
 	ID           string                        `json:"Id"`
 	Digest       digest.Digest                 `json:"Digest"`
@@ -36,23 +36,8 @@ type ImageData struct {
 	HealthCheck  *manifest.Schema2HealthConfig `json:"Healthcheck,omitempty"`
 }
 
-// RootFS holds the root fs information of an image
+// RootFS holds the root fs information of an image.
 type RootFS struct {
 	Type   string          `json:"Type"`
 	Layers []digest.Digest `json:"Layers"`
-}
-
-// ImageResult is used for podman images for collection and output
-type ImageResult struct {
-	Tag          string
-	Repository   string
-	RepoDigests  []string
-	RepoTags     []string
-	ID           string
-	Digest       digest.Digest
-	ConfigDigest digest.Digest
-	Created      time.Time
-	Size         *uint64
-	Labels       map[string]string
-	Dangling     bool
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"go/build"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -14,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/onsi/gomega/internal/gutil"
 )
 
 var (
@@ -73,6 +74,8 @@ A path pointing to this binary is returned.
 
 CompileTest uses the $GOPATH set in your environment. If $GOPATH is not set and you are using Go 1.8+,
 it will use the default GOPATH instead.  It passes the variadic args on to `go test`.
+
+Deprecated: CompileTest makes GOPATH assumptions that don't translate well to the go modules world.
 */
 func CompileTest(packagePath string, args ...string) (compiledPath string, err error) {
 	return doCompileTest(build.Default.GOPATH, packagePath, nil, args...)
@@ -80,17 +83,21 @@ func CompileTest(packagePath string, args ...string) (compiledPath string, err e
 
 /*
 GetAndCompileTest is identical to CompileTest but `go get` the package before compiling tests.
+
+Deprecated: GetAndCompileTest makes GOPATH assumptions that don't translate well to the go modules world.
 */
 func GetAndCompileTest(packagePath string, args ...string) (compiledPath string, err error) {
-	if err := getForTest(build.Default.GOPATH, packagePath, nil); err != nil {
+	if err := getForTest(build.Default.GOPATH, packagePath, []string{"GO111MODULE=off"}); err != nil {
 		return "", err
 	}
 
-	return doCompileTest(build.Default.GOPATH, packagePath, nil, args...)
+	return doCompileTest(build.Default.GOPATH, packagePath, []string{"GO111MODULE=off"}, args...)
 }
 
 /*
 CompileTestWithEnvironment is identical to CompileTest but allows you to specify env vars to be set at build time.
+
+Deprecated: CompileTestWithEnvironment makes GOPATH assumptions that don't translate well to the go modules world.
 */
 func CompileTestWithEnvironment(packagePath string, env []string, args ...string) (compiledPath string, err error) {
 	return doCompileTest(build.Default.GOPATH, packagePath, env, args...)
@@ -98,17 +105,21 @@ func CompileTestWithEnvironment(packagePath string, env []string, args ...string
 
 /*
 GetAndCompileTestWithEnvironment is identical to GetAndCompileTest but allows you to specify env vars to be set at build time.
+
+Deprecated: GetAndCompileTestWithEnvironment makes GOPATH assumptions that don't translate well to the go modules world.
 */
 func GetAndCompileTestWithEnvironment(packagePath string, env []string, args ...string) (compiledPath string, err error) {
-	if err := getForTest(build.Default.GOPATH, packagePath, env); err != nil {
+	if err := getForTest(build.Default.GOPATH, packagePath, append(env, "GO111MODULE=off")); err != nil {
 		return "", err
 	}
 
-	return doCompileTest(build.Default.GOPATH, packagePath, env, args...)
+	return doCompileTest(build.Default.GOPATH, packagePath, append(env, "GO111MODULE=off"), args...)
 }
 
 /*
 CompileTestIn is identical to CompileTest but allows you to specify a custom $GOPATH (the first argument).
+
+Deprecated: CompileTestIn makes GOPATH assumptions that don't translate well to the go modules world.
 */
 func CompileTestIn(gopath string, packagePath string, args ...string) (compiledPath string, err error) {
 	return doCompileTest(gopath, packagePath, nil, args...)
@@ -118,11 +129,11 @@ func CompileTestIn(gopath string, packagePath string, args ...string) (compiledP
 GetAndCompileTestIn is identical to GetAndCompileTest but allows you to specify a custom $GOPATH (the first argument).
 */
 func GetAndCompileTestIn(gopath string, packagePath string, args ...string) (compiledPath string, err error) {
-	if err := getForTest(gopath, packagePath, nil); err != nil {
+	if err := getForTest(gopath, packagePath, []string{"GO111MODULE=off"}); err != nil {
 		return "", err
 	}
 
-	return doCompileTest(gopath, packagePath, nil, args...)
+	return doCompileTest(gopath, packagePath, []string{"GO111MODULE=off"}, args...)
 }
 
 func isLocalPackage(packagePath string) bool {
@@ -222,11 +233,11 @@ func temporaryDirectory() (string, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	if tmpDir == "" {
-		tmpDir, err = ioutil.TempDir("", "gexec_artifacts")
+		tmpDir, err = gutil.MkdirTemp("", "gexec_artifacts")
 		if err != nil {
 			return "", err
 		}
 	}
 
-	return ioutil.TempDir(tmpDir, "g")
+	return gutil.MkdirTemp(tmpDir, "g")
 }

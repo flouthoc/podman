@@ -1,87 +1,23 @@
 package entities
 
 import (
+	"errors"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/containers/podman/v3/pkg/ps/define"
-	"github.com/cri-o/ocicni/pkg/ocicni"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/pkg/domain/entities/types"
 )
 
-// Listcontainer describes a container suitable for listing
-type ListContainer struct {
-	// AutoRemove
-	AutoRemove bool
-	// Container command
-	Command []string
-	// Container creation time
-	Created time.Time
-	// Human readable container creation time.
-	CreatedAt string
-	// If container has exited/stopped
-	Exited bool
-	// Time container exited
-	ExitedAt int64
-	// If container has exited, the return code from the command
-	ExitCode int32
-	// The unique identifier for the container
-	ID string `json:"Id"`
-	// Container image
-	Image string
-	// Container image ID
-	ImageID string
-	// If this container is a Pod infra container
-	IsInfra bool
-	// Labels for container
-	Labels map[string]string
-	// User volume mounts
-	Mounts []string
-	// The names assigned to the container
-	Names []string
-	// Namespaces the container belongs to.  Requires the
-	// namespace boolean to be true
-	Namespaces ListContainerNamespaces
-	// The network names assigned to the container
-	Networks []string
-	// The process id of the container
-	Pid int
-	// If the container is part of Pod, the Pod ID. Requires the pod
-	// boolean to be set
-	Pod string
-	// If the container is part of Pod, the Pod name. Requires the pod
-	// boolean to be set
-	PodName string
-	// Port mappings
-	Ports []ocicni.PortMapping
-	// Size of the container rootfs.  Requires the size boolean to be true
-	Size *define.ContainerSize
-	// Time when container started
-	StartedAt int64
-	// State of container
-	State string
-	// Status is a human-readable approximation of a duration for json output
-	Status string
-}
+// ExternalContainerFilter is a function to determine whether a container list is included
+// in command output. Container lists to be outputted are tested using the function.
+// A true return will include the container list, a false return will exclude it.
+type ExternalContainerFilter func(*ListContainer) bool
 
-// ListContainer Namespaces contains the identifiers of the container's Linux namespaces
-type ListContainerNamespaces struct {
-	// Mount namespace
-	MNT string `json:"Mnt,omitempty"`
-	// Cgroup namespace
-	Cgroup string `json:"Cgroup,omitempty"`
-	// IPC namespace
-	IPC string `json:"Ipc,omitempty"`
-	// Network namespace
-	NET string `json:"Net,omitempty"`
-	// PID namespace
-	PIDNS string `json:"Pidns,omitempty"`
-	// UTS namespace
-	UTS string `json:"Uts,omitempty"`
-	// User namespace
-	User string `json:"User,omitempty"`
-}
+// ListContainer describes a container suitable for listing
+type ListContainer = types.ListContainer
+
+// ListContainerNamespaces contains the identifiers of the container's Linux namespaces
+type ListContainerNamespaces = types.ListContainerNamespaces
 
 type SortListContainers []ListContainer
 
@@ -166,35 +102,7 @@ func SortPsOutput(sortBy string, psOutput SortListContainers) (SortListContainer
 	case "pod":
 		sort.Sort(psSortedPod{psOutput})
 	default:
-		return nil, errors.Errorf("invalid option for --sort, options are: command, created, id, image, names, runningfor, size, or status")
+		return nil, errors.New("invalid option for --sort, options are: command, created, id, image, names, runningfor, size, or status")
 	}
 	return psOutput, nil
-}
-
-func (l ListContainer) CGROUPNS() string {
-	return l.Namespaces.Cgroup
-}
-
-func (l ListContainer) IPC() string {
-	return l.Namespaces.IPC
-}
-
-func (l ListContainer) MNT() string {
-	return l.Namespaces.MNT
-}
-
-func (l ListContainer) NET() string {
-	return l.Namespaces.NET
-}
-
-func (l ListContainer) PIDNS() string {
-	return l.Namespaces.PIDNS
-}
-
-func (l ListContainer) USERNS() string {
-	return l.Namespaces.User
-}
-
-func (l ListContainer) UTS() string {
-	return l.Namespaces.UTS
 }

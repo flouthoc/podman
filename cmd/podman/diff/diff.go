@@ -2,19 +2,19 @@ package diff
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/docker/docker/pkg/archive"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/storage/pkg/archive"
 )
 
-func Diff(cmd *cobra.Command, args []string, options entities.DiffOptions) error {
-	results, err := registry.ContainerEngine().Diff(registry.GetContext(), args, options)
+func Diff(_ *cobra.Command, args []string, options entities.DiffOptions) error {
+	results, err := registry.ContainerEngine().Diff(registry.Context(), args, options)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func changesToJSON(diffs *entities.DiffReport) error {
 		case archive.ChangeModify:
 			body.Changed = append(body.Changed, row.Path)
 		default:
-			return errors.Errorf("output kind %q not recognized", row.Kind)
+			return fmt.Errorf("output kind %q not recognized", row.Kind)
 		}
 	}
 
@@ -63,7 +63,7 @@ func changesToTable(diffs *entities.DiffReport) error {
 	return nil
 }
 
-// IDOrLatestArgs used to validate a nameOrId was provided or the "--latest" flag
+// ValidateContainerDiffArgs used to validate a nameOrId was provided or the "--latest" flag
 func ValidateContainerDiffArgs(cmd *cobra.Command, args []string) error {
 	given, _ := cmd.Flags().GetBool("latest")
 	if len(args) > 0 && !given {
@@ -73,7 +73,10 @@ func ValidateContainerDiffArgs(cmd *cobra.Command, args []string) error {
 		return errors.New("--latest and containers cannot be used together")
 	}
 	if len(args) == 0 && !given {
-		return errors.Errorf("%q requires a name, id, or the \"--latest\" flag", cmd.CommandPath())
+		if registry.IsRemote() {
+			return fmt.Errorf("%q requires a name or id", cmd.CommandPath())
+		}
+		return fmt.Errorf("%q requires a name, id, or the \"--latest\" flag", cmd.CommandPath())
 	}
 	return nil
 }

@@ -1,41 +1,55 @@
 package entities
 
-import "io"
+import (
+	"github.com/containers/podman/v5/pkg/domain/entities/types"
+)
 
 // GenerateSystemdOptions control the generation of systemd unit files.
 type GenerateSystemdOptions struct {
-	// Name - use container/pod name instead of its ID.
-	Name bool
-	// New - create a new container instead of starting a new one.
-	New bool
-	// RestartPolicy - systemd restart policy.
-	RestartPolicy string
-	// StopTimeout - time when stopping the container.
-	StopTimeout *uint
-	// ContainerPrefix - systemd unit name prefix for containers
-	ContainerPrefix string
-	// PodPrefix - systemd unit name prefix for pods
-	PodPrefix string
-	// Separator - systemd unit name separator between name/id and prefix
-	Separator string
-	// NoHeader - skip header generation
-	NoHeader bool
+	Name                   bool
+	New                    bool
+	RestartPolicy          *string
+	RestartSec             *uint
+	StartTimeout           *uint
+	StopTimeout            *uint
+	ContainerPrefix        string
+	PodPrefix              string
+	Separator              string
+	NoHeader               bool
+	TemplateUnitFile       bool
+	Wants                  []string
+	After                  []string
+	Requires               []string
+	AdditionalEnvVariables []string
 }
 
 // GenerateSystemdReport
-type GenerateSystemdReport struct {
-	// Units of the generate process. key = unit name -> value = unit content
-	Units map[string]string
-}
+type GenerateSystemdReport = types.GenerateSystemdReport
 
 // GenerateKubeOptions control the generation of Kubernetes YAML files.
 type GenerateKubeOptions struct {
+	// PodmanOnly - add podman-only reserved annotations in the generated YAML file (Cannot be used by Kubernetes)
+	PodmanOnly bool
 	// Service - generate YAML for a Kubernetes _service_ object.
 	Service bool
+	// Type - the k8s kind to be generated i.e Pod or Deployment
+	Type string
+	// Replicas - the value to set in the replicas field for a Deployment
+	Replicas int32
+	// UseLongAnnotations - don't truncate annotations to the Kubernetes maximum length of 63 characters
+	UseLongAnnotations bool
 }
 
+type KubeGenerateOptions = GenerateKubeOptions
+
 // GenerateKubeReport
-type GenerateKubeReport struct {
-	// Reader - the io.Reader to reader the generated YAML file.
-	Reader io.Reader
+type GenerateKubeReport = types.GenerateKubeReport
+
+type GenerateSpecReport = types.GenerateSpecReport
+
+type GenerateSpecOptions struct {
+	ID       string
+	FileName string
+	Compact  bool
+	Name     bool
 }

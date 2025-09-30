@@ -1,12 +1,15 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
 	"time"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod/define"
 )
 
 // Contains the public Runtime API for pods
@@ -26,33 +29,27 @@ type PodFilter func(*Pod) bool
 // If force is specified with removeCtrs, all containers will be stopped before
 // being removed
 // Otherwise, the pod will not be removed if any containers are running
-func (r *Runtime) RemovePod(ctx context.Context, p *Pod, removeCtrs, force bool) error {
-	r.lock.Lock()
-	defer r.lock.Unlock()
-
+func (r *Runtime) RemovePod(ctx context.Context, p *Pod, removeCtrs, force bool, timeout *uint) (map[string]error, error) {
 	if !r.valid {
-		return define.ErrRuntimeStopped
+		return nil, define.ErrRuntimeStopped
 	}
 
 	if !p.valid {
 		if ok, _ := r.state.HasPod(p.ID()); !ok {
 			// Pod probably already removed
 			// Or was never in the runtime to begin with
-			return nil
+			return make(map[string]error), nil
 		}
 	}
 
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	return r.removePod(ctx, p, removeCtrs, force)
+	return r.removePod(ctx, p, removeCtrs, force, timeout)
 }
 
 // GetPod retrieves a pod by its ID
 func (r *Runtime) GetPod(id string) (*Pod, error) {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
 	}
@@ -62,9 +59,6 @@ func (r *Runtime) GetPod(id string) (*Pod, error) {
 
 // HasPod checks to see if a pod with the given ID exists
 func (r *Runtime) HasPod(id string) (bool, error) {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	if !r.valid {
 		return false, define.ErrRuntimeStopped
 	}
@@ -75,9 +69,6 @@ func (r *Runtime) HasPod(id string) (bool, error) {
 // LookupPod retrieves a pod by its name or a partial ID
 // If a partial ID is not unique, an error will be returned
 func (r *Runtime) LookupPod(idOrName string) (*Pod, error) {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
 	}
@@ -111,9 +102,6 @@ func (r *Runtime) Pods(filters ...PodFilter) ([]*Pod, error) {
 
 // GetAllPods retrieves all pods
 func (r *Runtime) GetAllPods() ([]*Pod, error) {
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
 	}
@@ -127,7 +115,7 @@ func (r *Runtime) GetLatestPod() (*Pod, error) {
 	var lastCreatedTime time.Time
 	pods, err := r.GetAllPods()
 	if err != nil {
-		return nil, errors.Wrapf(err, "unable to get all pods")
+		return nil, fmt.Errorf("unable to get all pods: %w", err)
 	}
 	if len(pods) == 0 {
 		return nil, define.ErrNoSuchPod
@@ -148,9 +136,6 @@ func (r *Runtime) GetRunningPods() ([]*Pod, error) {
 		pods        []string
 		runningPods []*Pod
 	)
-	r.lock.RLock()
-	defer r.lock.RUnlock()
-
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
 	}
@@ -160,11 +145,11 @@ func (r *Runtime) GetRunningPods() ([]*Pod, error) {
 	}
 	// Assemble running pods
 	for _, c := range containers {
-		if !util.StringInSlice(c.PodID(), pods) {
+		if !slices.Contains(pods, c.PodID()) {
 			pods = append(pods, c.PodID())
 			pod, err := r.GetPod(c.PodID())
 			if err != nil {
-				if errors.Cause(err) == define.ErrPodRemoved || errors.Cause(err) == define.ErrNoSuchPod {
+				if errors.Is(err, define.ErrPodRemoved) || errors.Is(err, define.ErrNoSuchPod) {
 					continue
 				}
 				return nil, err
@@ -181,12 +166,7 @@ func (r *Runtime) PrunePods(ctx context.Context) (map[string]error, error) {
 	states := []string{define.PodStateStopped, define.PodStateExited}
 	filterFunc := func(p *Pod) bool {
 		state, _ := p.GetPodStatus()
-		for _, status := range states {
-			if state == status {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(states, state)
 	}
 	pods, err := r.Pods(filterFunc)
 	if err != nil {
@@ -196,7 +176,8 @@ func (r *Runtime) PrunePods(ctx context.Context) (map[string]error, error) {
 		return response, nil
 	}
 	for _, pod := range pods {
-		err := r.removePod(context.TODO(), pod, true, false)
+		var timeout *uint
+		_, err := r.removePod(context.TODO(), pod, true, false, timeout)
 		response[pod.ID()] = err
 	}
 	return response, nil

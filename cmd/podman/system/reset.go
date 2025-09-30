@@ -1,4 +1,4 @@
-// +build !remote
+//go:build !remote
 
 package system
 
@@ -8,19 +8,19 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/domain/infra"
+	"github.com/containers/buildah/pkg/volumes"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
-	systemResetDescription = `Reset podman storage back to default state"
+	systemResetDescription = `Reset podman storage back to default state
 
-  All containers will be stopped and removed, and all images, volumes and container content will be removed.
+  All containers will be stopped and removed, and all images, volumes, networks and container content will be removed.
+  This command does not restart podman.service and podman.socket systemd units. You may need to manually restart it after running this command.
 `
 	systemResetCommand = &cobra.Command{
 		Annotations:       map[string]string{registry.EngineMode: registry.ABIMode},
@@ -46,20 +46,29 @@ func init() {
 
 func reset(cmd *cobra.Command, args []string) {
 	// Get all the external containers in use
-	listCtn, _ := registry.ContainerEngine().ContainerListExternal(registry.Context())
-	listCtnIds := make([]string, 0, len(listCtn))
-	for _, externalCtn := range listCtn {
-		listCtnIds = append(listCtnIds, externalCtn.ID)
+	listCtn, err := registry.ContainerEngine().ContainerListExternal(registry.Context())
+	if err != nil {
+		logrus.Error(err)
 	}
 	// Prompt for confirmation if --force is not set
 	if !forceFlag {
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Println(`
-WARNING! This will remove:
+		fmt.Println(`WARNING! This will remove:
         - all containers
         - all pods
         - all images
-        - all build cache`)
+        - all networks
+        - all build cache
+        - all machines
+        - all volumes`)
+
+		info, _ := registry.ContainerEngine().Info(registry.Context())
+		// lets not hard fail in case of an error
+		if info != nil {
+			fmt.Printf("        - the graphRoot directory: %q\n", info.Store.GraphRoot)
+			fmt.Printf("        - the runRoot directory: %q\n", info.Store.RunRoot)
+		}
+
 		if len(listCtn) > 0 {
 			fmt.Println(`WARNING! The following external containers will be purged:`)
 			// print first 12 characters of ID and first configured name alias
@@ -78,22 +87,20 @@ WARNING! This will remove:
 		}
 	}
 
-	// Purge all the external containers with storage
-	registry.ContainerEngine().ContainerRm(registry.Context(), listCtnIds, entities.RmOptions{Force: true, All: true, Ignore: true, Volumes: true})
-	// Shutdown all running engines, `reset` will hijack repository
-	registry.ContainerEngine().Shutdown(registry.Context())
-	registry.ImageEngine().Shutdown(registry.Context())
-
-	engine, err := infra.NewSystemEngine(entities.ResetMode, registry.PodmanConfig())
-	if err != nil {
+	// Clean build cache if any
+	if err := volumes.CleanCacheMount(); err != nil {
 		logrus.Error(err)
-		os.Exit(125)
 	}
-	defer engine.Shutdown(registry.Context())
 
-	if err := engine.Reset(registry.Context()); err != nil {
+	// ContainerEngine() is unusable and shut down after this.
+	if err := registry.ContainerEngine().Reset(registry.Context()); err != nil {
 		logrus.Error(err)
-		os.Exit(125)
 	}
+
+	// Shutdown podman-machine and delete all machine files
+	if err := resetMachine(); err != nil {
+		logrus.Error(err)
+	}
+
 	os.Exit(0)
 }

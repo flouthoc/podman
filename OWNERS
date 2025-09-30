@@ -1,30 +1,34 @@
 approvers:
-  - baude
-  - edsantiago
-  - giuseppe
-  - jwhonce
   - Luap99
-  - mheon
-  - mtrmac
-  - rhatdan
-  - saschagrunert
   - TomSweeneyRedHat
-  - umohnani8
-  - vrothberg
-  - zhangguanzhang
-reviewers:
   - ashley-cui
   - baude
-  - edsantiago
   - giuseppe
-  - jwhonce
-  - Luap99
+  - l0rd
+  - lsm5
   - mheon
   - mtrmac
-  - QiWang19
-  - rhatdan
-  - saschagrunert
+  - nalind
+  - ygalblum
+reviewers:
+  - Luap99
   - TomSweeneyRedHat
+  - baude
+  - flouthoc
+  - giuseppe
+  - Honny1
+  - inknos
+  - jakecorrenti
+  - jankaluza
+  - jwhonce
+  - l0rd
+  - lsm5
+  - mheon
+  - mtrmac
+  - n1hility
+  - nalind
+  - ninja-quokka
+  - rhatdan
   - umohnani8
   - vrothberg
-  - zhangguanzhang
+  - ygalblum

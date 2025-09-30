@@ -1,11 +1,11 @@
 package images
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/diff"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/diff"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -34,9 +34,7 @@ func init() {
 }
 
 func diffFlags(flags *pflag.FlagSet) {
-	diffOpts = &entities.DiffOptions{}
-	flags.BoolVar(&diffOpts.Archive, "archive", true, "Save the diff as a tar archive")
-	_ = flags.MarkDeprecated("archive", "Provided for backwards compatibility, has no impact on output.")
+	diffOpts = new(entities.DiffOptions)
 
 	formatFlagName := "format"
 	flags.StringVar(&diffOpts.Format, formatFlagName, "", "Change the output format (json)")

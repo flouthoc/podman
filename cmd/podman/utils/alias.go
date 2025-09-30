@@ -5,6 +5,8 @@ import "github.com/spf13/pflag"
 // AliasFlags is a function to handle backwards compatibility with old flags
 func AliasFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
 	switch name {
+	case "dns-opt":
+		name = "dns-option"
 	case "healthcheck-command":
 		name = "health-cmd"
 	case "healthcheck-interval":
@@ -21,8 +23,8 @@ func AliasFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
 		name = "ns"
 	case "storage":
 		name = "external"
-	case "purge":
-		name = "rm"
+	case "notruncate":
+		name = "no-trunc"
 	case "override-arch":
 		name = "arch"
 	case "override-os":
@@ -35,8 +37,7 @@ func AliasFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
 
 // TimeoutAliasFlags is a function to handle backwards compatibility with old timeout flags
 func TimeoutAliasFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
-	switch name {
-	case "timeout":
+	if name == "timeout" {
 		name = "time"
 	}
 	return pflag.NormalizedName(name)

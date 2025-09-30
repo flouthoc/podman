@@ -1,79 +1,80 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
-	"os"
+	"slices"
 
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gexec"
 )
 
 var _ = Describe("Podman mount", func() {
-	var (
-		tempdir    string
-		err        error
-		podmanTest *PodmanTestIntegration
-	)
 
 	BeforeEach(func() {
 		SkipIfNotRootless("This function is not enabled for rootful podman")
 		SkipIfRemote("Podman mount not supported for remote connections")
-		tempdir, err = CreateTempDirInTempDir()
-		if err != nil {
-			os.Exit(1)
-		}
-		podmanTest = PodmanTestCreate(tempdir)
-		podmanTest.Setup()
-		podmanTest.SeedImages()
-	})
-
-	AfterEach(func() {
-		podmanTest.Cleanup()
-		f := CurrentGinkgoTestDescription()
-		processTestResult(f)
-
 	})
 
 	It("podman mount", func() {
 		setup := podmanTest.Podman([]string{"create", ALPINE, "ls"})
 		setup.WaitWithDefaultTimeout()
-		Expect(setup).Should(Exit(0))
+		Expect(setup).Should(ExitCleanly())
 		cid := setup.OutputToString()
 
 		mount := podmanTest.Podman([]string{"mount", cid})
 		mount.WaitWithDefaultTimeout()
-		Expect(mount).To(ExitWithError())
-		Expect(mount.ErrorToString()).To(ContainSubstring("podman unshare"))
+		Expect(mount).To(ExitWithError(125, "must execute `podman unshare` first"))
 	})
 
 	It("podman unshare podman mount", func() {
 		setup := podmanTest.Podman([]string{"create", ALPINE, "ls"})
 		setup.WaitWithDefaultTimeout()
-		Expect(setup).Should(Exit(0))
+		Expect(setup).Should(ExitCleanly())
 		cid := setup.OutputToString()
 
-		session := podmanTest.Podman([]string{"unshare", PODMAN_BINARY, "mount", cid})
+		// command: podman <options> unshare podman <options> mount cid
+		args := []string{"unshare", podmanTest.PodmanBinary}
+		opts := podmanTest.PodmanMakeOptions([]string{"mount", cid}, PodmanExecOptions{})
+		args = append(args, opts...)
+
+		// container root file system location is podmanTest.TempDir/...
+		// because "--root podmanTest.TempDir/..."
+		session := podmanTest.Podman(args)
 		session.WaitWithDefaultTimeout()
-		Expect(setup).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).To(ContainSubstring(podmanTest.TempDir))
 	})
 
 	It("podman image mount", func() {
 		podmanTest.AddImageToRWStore(ALPINE)
 		mount := podmanTest.Podman([]string{"image", "mount", ALPINE})
 		mount.WaitWithDefaultTimeout()
-		Expect(mount).To(ExitWithError())
-		Expect(mount.ErrorToString()).To(ContainSubstring("podman unshare"))
+		Expect(mount).To(ExitWithError(125, "must execute `podman unshare` first"))
 	})
 
 	It("podman unshare image podman mount", func() {
-		podmanTest.AddImageToRWStore(ALPINE)
-		setup := podmanTest.Podman([]string{"pull", ALPINE})
-		setup.WaitWithDefaultTimeout()
-		Expect(setup).Should(Exit(0))
+		podmanTest.AddImageToRWStore(CITEST_IMAGE)
 
-		session := podmanTest.Podman([]string{"unshare", PODMAN_BINARY, "image", "mount", ALPINE})
+		// command: podman <options> unshare podman <options> image mount IMAGE
+		args := []string{"unshare", podmanTest.PodmanBinary}
+		opts := podmanTest.PodmanMakeOptions([]string{"image", "mount", CITEST_IMAGE}, PodmanExecOptions{})
+		args = append(args, opts...)
+
+		// image location is podmanTest.TempDir/... because "--root podmanTest.TempDir/..."
+		session := podmanTest.Podman(args)
 		session.WaitWithDefaultTimeout()
-		Expect(setup).Should(Exit(0))
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToString()).To(ContainSubstring(podmanTest.TempDir))
+
+		// We have to unmount the image again otherwise we leak the tmpdir
+		// as active mount points cannot be removed.
+		index := slices.Index(args, "mount")
+		Expect(index).To(BeNumerically(">", 0), "index should be found")
+		args[index] = "unmount"
+		session = podmanTest.Podman(args)
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
 	})
 })

@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package integration
 
 import (
@@ -9,11 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v3/pkg/rootless"
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gexec"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,44 +21,24 @@ const sigCatch = "trap \"echo FOO >> /h/fifo \" 8; echo READY >> /h/fifo; while 
 const sigCatch2 = "trap \"echo Received\" SIGFPE; while :; do sleep 0.25; done"
 
 var _ = Describe("Podman run with --sig-proxy", func() {
-	var (
-		tmpdir     string
-		err        error
-		podmanTest *PodmanTestIntegration
-	)
-
-	BeforeEach(func() {
-		tmpdir, err = CreateTempDirInTempDir()
-		if err != nil {
-			os.Exit(1)
-		}
-		podmanTest = PodmanTestCreate(tmpdir)
-		podmanTest.Setup()
-		podmanTest.SeedImages()
-	})
-
-	AfterEach(func() {
-		podmanTest.Cleanup()
-		f := CurrentGinkgoTestDescription()
-		processTestResult(f)
-
-	})
 
 	Specify("signals are forwarded to container using sig-proxy", func() {
-		SkipIfRemote("FIXME: This looks like it is supposed to work in remote")
 		if podmanTest.Host.Arch == "ppc64le" {
 			Skip("Doesn't work on ppc64le")
 		}
 		signal := syscall.SIGFPE
 		// Set up a socket for communication
-		udsDir := filepath.Join(tmpdir, "socket")
-		os.Mkdir(udsDir, 0700)
+		udsDir := filepath.Join(tempdir, "socket")
+		err := os.Mkdir(udsDir, 0700)
+		Expect(err).ToNot(HaveOccurred())
 		udsPath := filepath.Join(udsDir, "fifo")
-		syscall.Mkfifo(udsPath, 0600)
-		if rootless.IsRootless() {
-			podmanTest.RestoreArtifact(fedoraMinimal)
+		err = syscall.Mkfifo(udsPath, 0600)
+		Expect(err).ToNot(HaveOccurred())
+		if isRootless() {
+			err = podmanTest.RestoreArtifact(fedoraMinimal)
+			Expect(err).ToNot(HaveOccurred())
 		}
-		_, pid := podmanTest.PodmanPID([]string{"run", "-it", "-v", fmt.Sprintf("%s:/h:Z", udsDir), fedoraMinimal, "bash", "-c", sigCatch})
+		_, pid := podmanTest.PodmanPID([]string{"run", "-v", fmt.Sprintf("%s:/h:Z", udsDir), fedoraMinimal, "bash", "-c", sigCatch})
 
 		uds, _ := os.OpenFile(udsPath, os.O_RDONLY|syscall.O_NONBLOCK, 0600)
 		defer uds.Close()
@@ -67,9 +47,9 @@ var _ = Describe("Podman run with --sig-proxy", func() {
 		counter := 0
 		for {
 			buf := make([]byte, 1024)
-			n, err := uds.Read(buf[:])
+			n, err := uds.Read(buf)
 			if err != nil && err != io.EOF {
-				fmt.Println(err)
+				GinkgoWriter.Println(err)
 				return
 			}
 			data := string(buf[0:n])
@@ -93,9 +73,9 @@ var _ = Describe("Podman run with --sig-proxy", func() {
 		counter = 0
 		for {
 			buf := make([]byte, 1024)
-			n, err := uds.Read(buf[:])
+			n, err := uds.Read(buf)
 			if err != nil {
-				fmt.Println(err)
+				GinkgoWriter.Println(err)
 				return
 			}
 			data := string(buf[0:n])
@@ -111,15 +91,10 @@ var _ = Describe("Podman run with --sig-proxy", func() {
 	})
 
 	Specify("signals are not forwarded to container with sig-proxy false", func() {
-		SkipIfRemote("FIXME: This looks like it is supposed to work in remote")
 		signal := syscall.SIGFPE
-		if rootless.IsRootless() {
-			podmanTest.RestoreArtifact(fedoraMinimal)
-		}
 		session, pid := podmanTest.PodmanPID([]string{"run", "--name", "test2", "--sig-proxy=false", fedoraMinimal, "bash", "-c", sigCatch2})
 
-		ok := WaitForContainer(podmanTest)
-		Expect(ok).To(BeTrue())
+		Expect(WaitForContainer(podmanTest)).To(BeTrue(), "WaitForContainer()")
 
 		// Kill with given signal
 		// Should be no output, SIGPOLL is usually ignored
@@ -130,12 +105,15 @@ var _ = Describe("Podman run with --sig-proxy", func() {
 		// Kill with -9 to guarantee the container dies
 		killSession := podmanTest.Podman([]string{"kill", "-s", "9", "test2"})
 		killSession.WaitWithDefaultTimeout()
-		Expect(killSession).Should(Exit(0))
+		Expect(killSession).Should(ExitCleanly())
 
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError())
-		ok, _ = session.GrepString("Received")
-		Expect(ok).To(BeFalse())
+		// Exit code is normally 2, however with GOTRACEBACK=crash (default in
+		// Fedora/RHEL rpm builds) it will be 134 thus allow both.
+		// https://github.com/containers/podman/issues/24213
+		errorMsg := "SIGFPE: floating-point exception"
+		Expect(session).To(Or(ExitWithError(2, errorMsg), ExitWithError(134, errorMsg)))
+		Expect(session.OutputToString()).To(Not(ContainSubstring("Received")))
 	})
 
 })

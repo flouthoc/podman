@@ -1,3 +1,5 @@
+//go:build !remote
+
 package compat
 
 import (
@@ -10,18 +12,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/libpod/logs"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/libpod/logs"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/util"
 	log "github.com/sirupsen/logrus"
 )
 
 func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
-	decoder := r.Context().Value("decoder").(*schema.Decoder)
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
+	decoder := utils.GetDecoder(r)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 
 	query := struct {
 		Follow     bool   `schema:"follow"`
@@ -35,13 +36,13 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 		Tail: "all",
 	}
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, "Something went wrong.", http.StatusBadRequest, errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
 
-	if !(query.Stdout || query.Stderr) {
+	if !query.Stdout && !query.Stderr {
 		msg := fmt.Sprintf("%s: you must choose at least one stream", http.StatusText(http.StatusBadRequest))
-		utils.Error(w, msg, http.StatusBadRequest, errors.Errorf("%s for %s", msg, r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("%s for %s", msg, r.URL.String()))
 		return
 	}
 
@@ -63,7 +64,7 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 
 	var since time.Time
 	if _, found := r.URL.Query()["since"]; found {
-		since, err = util.ParseInputTime(query.Since)
+		since, err = util.ParseInputTime(query.Since, true)
 		if err != nil {
 			utils.BadRequest(w, "since", query.Since, err)
 			return
@@ -73,7 +74,7 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 	var until time.Time
 	if _, found := r.URL.Query()["until"]; found {
 		if query.Until != "0" {
-			until, err = util.ParseInputTime(query.Until)
+			until, err = util.ParseInputTime(query.Until, false)
 			if err != nil {
 				utils.BadRequest(w, "until", query.Until, err)
 				return
@@ -95,7 +96,7 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 
 	logChannel := make(chan *logs.LogLine, tail+1)
 	if err := runtime.Log(r.Context(), []*libpod.Container{ctnr}, options, logChannel); err != nil {
-		utils.InternalServerError(w, errors.Wrapf(err, "failed to obtain logs for Container '%s'", name))
+		utils.InternalServerError(w, fmt.Errorf("failed to obtain logs for Container '%s': %w", name, err))
 		return
 	}
 	go func() {
@@ -105,6 +106,13 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 
+	flush := func() {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+	flush()
+
 	var frame strings.Builder
 	header := make([]byte, 8)
 
@@ -113,7 +121,7 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 	if !utils.IsLibpodRequest(r) {
 		inspectData, err := ctnr.Inspect(false)
 		if err != nil {
-			utils.InternalServerError(w, errors.Wrapf(err, "failed to obtain logs for Container '%s'", name))
+			utils.InternalServerError(w, fmt.Errorf("failed to obtain logs for Container '%s': %w", name, err))
 			return
 		}
 		writeHeader = !inspectData.Config.Tty
@@ -152,9 +160,7 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 		}
 
 		frame.WriteString(line.Msg)
-		// Log lines in the compat layer require adding EOL
-		// https://github.com/containers/podman/issues/8058
-		if !utils.IsLibpodRequest(r) {
+		if !line.Partial() {
 			frame.WriteString("\n")
 		}
 
@@ -168,8 +174,6 @@ func LogsFromContainer(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.WriteString(w, frame.String()); err != nil {
 			log.Errorf("unable to write frame string: %q", err)
 		}
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
+		flush()
 	}
 }

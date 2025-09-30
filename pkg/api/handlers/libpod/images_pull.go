@@ -1,21 +1,26 @@
+//go:build !remote
+
 package libpod
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"time"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v3/libpod"
-	"github.com/containers/podman/v3/pkg/api/handlers/utils"
-	"github.com/containers/podman/v3/pkg/auth"
-	"github.com/containers/podman/v3/pkg/channel"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/libpod"
+	"github.com/containers/podman/v5/pkg/api/handlers/utils"
+	api "github.com/containers/podman/v5/pkg/api/types"
+	"github.com/containers/podman/v5/pkg/auth"
+	"github.com/containers/podman/v5/pkg/channel"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/gorilla/schema"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/types"
 )
 
 // ImagesPull is the v2 libpod endpoint for pulling images.  Note that the
@@ -23,24 +28,33 @@ import (
 // transport or be normalized to one).  Other transports are rejected as they
 // do not make sense in a remote context.
 func ImagesPull(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value("runtime").(*libpod.Runtime)
-	decoder := r.Context().Value("decoder").(*schema.Decoder)
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
 	query := struct {
-		Reference  string `schema:"reference"`
-		OS         string `schema:"OS"`
-		Arch       string `schema:"Arch"`
-		Variant    string `schema:"Variant"`
-		TLSVerify  bool   `schema:"tlsVerify"`
 		AllTags    bool   `schema:"allTags"`
+		CompatMode bool   `schema:"compatMode"`
 		PullPolicy string `schema:"policy"`
+		Quiet      bool   `schema:"quiet"`
+		Reference  string `schema:"reference"`
+		Retry      uint   `schema:"retry"`
+		RetryDelay string `schema:"retrydelay"`
+		TLSVerify  bool   `schema:"tlsVerify"`
+		// Platform fields below:
+		Arch    string `schema:"Arch"`
+		OS      string `schema:"OS"`
+		Variant string `schema:"Variant"`
 	}{
 		TLSVerify:  true,
 		PullPolicy: "always",
 	}
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
-		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest,
-			errors.Wrapf(err, "failed to parse parameters for %s", r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
+		return
+	}
+
+	if query.Quiet && query.CompatMode {
+		utils.InternalServerError(w, errors.New("'quiet' and 'compatMode' cannot be used simultaneously"))
 		return
 	}
 
@@ -51,7 +65,7 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 
 	// Make sure that the reference has no transport or the docker one.
 	if err := utils.IsRegistryReference(query.Reference); err != nil {
-		utils.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest, err)
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -66,9 +80,9 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Do the auth dance.
-	authConf, authfile, key, err := auth.GetCredentials(r)
+	authConf, authfile, err := auth.GetCredentials(r)
 	if err != nil {
-		utils.Error(w, "failed to retrieve repository credentials", http.StatusBadRequest, errors.Wrapf(err, "failed to parse %q header for %s", key, r.URL.String()))
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 	defer auth.RemoveAuthfile(authfile)
@@ -80,16 +94,49 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 		pullOptions.IdentityToken = authConf.IdentityToken
 	}
 
-	writer := channel.NewWriter(make(chan []byte))
-	defer writer.Close()
-
-	pullOptions.Writer = writer
-
 	pullPolicy, err := config.ParsePullPolicy(query.PullPolicy)
 	if err != nil {
-		utils.Error(w, "failed to parse pull policy", http.StatusBadRequest, err)
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
+
+	if _, found := r.URL.Query()["retry"]; found {
+		pullOptions.MaxRetries = &query.Retry
+	}
+
+	if _, found := r.URL.Query()["retrydelay"]; found {
+		duration, err := time.ParseDuration(query.RetryDelay)
+		if err != nil {
+			utils.Error(w, http.StatusBadRequest, err)
+			return
+		}
+		pullOptions.RetryDelay = &duration
+	}
+
+	// Let's keep thing simple when running in quiet mode and pull directly.
+	if query.Quiet {
+		images, err := runtime.LibimageRuntime().Pull(r.Context(), query.Reference, pullPolicy, pullOptions)
+		var report entities.ImagePullReport
+		if err != nil {
+			report.Error = err.Error()
+		}
+		for _, image := range images {
+			report.Images = append(report.Images, image.ID())
+			// Pull last ID from list and publish in 'id' stanza.  This maintains previous API contract
+			report.ID = image.ID()
+		}
+		utils.WriteResponse(w, http.StatusOK, report)
+		return
+	}
+
+	if query.CompatMode {
+		utils.CompatPull(r.Context(), w, runtime, query.Reference, pullPolicy, pullOptions)
+		return
+	}
+
+	writer := channel.NewWriter(make(chan []byte))
+	defer writer.Close()
+	pullOptions.Writer = writer
 
 	var pulledImages []*libimage.Image
 	var pullError error
@@ -105,8 +152,8 @@ func ImagesPull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Header().Add("Content-Type", "application/json")
 	flush()
 
 	enc := json.NewEncoder(w)

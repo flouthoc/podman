@@ -1,12 +1,12 @@
 package containers
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/inspect"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/inspect"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
@@ -35,18 +35,13 @@ func init() {
 
 	formatFlagName := "format"
 	flags.StringVarP(&inspectOpts.Format, formatFlagName, "f", "json", "Format the output to a Go template or json")
-	_ = inspectCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(define.InspectContainerData{
-		State:           &define.InspectContainerState{},
-		NetworkSettings: &define.InspectNetworkSettings{},
-		Config:          &define.InspectContainerConfig{},
-		HostConfig:      &define.InspectContainerHostConfig{},
-	}))
+	_ = inspectCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&define.InspectContainerData{}))
 
 	validate.AddLatestFlag(inspectCmd, &inspectOpts.Latest)
 }
 
 func inspectExec(cmd *cobra.Command, args []string) error {
 	// Force container type
-	inspectOpts.Type = inspect.ContainerType
+	inspectOpts.Type = common.ContainerType
 	return inspect.Inspect(args, *inspectOpts)
 }

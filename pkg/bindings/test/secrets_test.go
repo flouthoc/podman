@@ -1,4 +1,4 @@
-package test_bindings
+package bindings_test
 
 import (
 	"context"
@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/podman/v3/pkg/bindings/secrets"
-	. "github.com/onsi/ginkgo"
+	"github.com/containers/podman/v5/pkg/bindings"
+	"github.com/containers/podman/v5/pkg/bindings/secrets"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
 )
@@ -26,8 +26,8 @@ var _ = Describe("Podman secrets", func() {
 		bt.RestoreImagesFromCache()
 		s = bt.startAPIService()
 		time.Sleep(1 * time.Second)
-		connText, err = bindings.NewConnection(context.Background(), bt.sock)
-		Expect(err).To(BeNil())
+		connText, err = bindings.NewConnection(context.Background(), bt.sock) //nolint:fatcontext
+		Expect(err).ToNot(HaveOccurred())
 	})
 
 	AfterEach(func() {
@@ -43,11 +43,11 @@ var _ = Describe("Podman secrets", func() {
 			Name: &name,
 		}
 		_, err := secrets.Create(connText, r, opts)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		// should not be allowed to create duplicate secret name
 		_, err = secrets.Create(connText, r, opts)
-		Expect(err).To(Not(BeNil()))
+		Expect(err).To(HaveOccurred())
 	})
 
 	It("inspect secret", func() {
@@ -57,14 +57,14 @@ var _ = Describe("Podman secrets", func() {
 			Name: &name,
 		}
 		_, err := secrets.Create(connText, r, opts)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		data, err := secrets.Inspect(connText, name, nil)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 		Expect(data.Spec.Name).To(Equal(name))
 
 		// inspecting non-existent secret should fail
-		data, err = secrets.Inspect(connText, "notasecret", nil)
+		_, err = secrets.Inspect(connText, "notasecret", nil)
 		code, _ := bindings.CheckResponseCode(err)
 		Expect(code).To(BeNumerically("==", http.StatusNotFound))
 	})
@@ -76,10 +76,10 @@ var _ = Describe("Podman secrets", func() {
 			Name: &name,
 		}
 		_, err := secrets.Create(connText, r, opts)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		data, err := secrets.List(connText, nil)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 		Expect(data[0].Spec.Name).To(Equal(name))
 	})
 
@@ -90,7 +90,7 @@ var _ = Describe("Podman secrets", func() {
 			Name: &name,
 		}
 		_, err := secrets.Create(connText, r, opts)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		r2 := strings.NewReader("mysecret2")
 		name2 := "mysecret2"
@@ -98,17 +98,17 @@ var _ = Describe("Podman secrets", func() {
 			Name: &name2,
 		}
 		_, err = secrets.Create(connText, r2, opts2)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		data, err := secrets.List(connText, nil)
-		Expect(err).To(BeNil())
-		Expect(len(data)).To(Equal(2))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(data).To(HaveLen(2))
 	})
 
 	It("list no secrets", func() {
 		data, err := secrets.List(connText, nil)
-		Expect(err).To(BeNil())
-		Expect(len(data)).To(Equal(0))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(data).To(BeEmpty())
 	})
 
 	It("remove secret", func() {
@@ -118,14 +118,14 @@ var _ = Describe("Podman secrets", func() {
 			Name: &name,
 		}
 		_, err := secrets.Create(connText, r, opts)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		err = secrets.Remove(connText, name)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		// removing non-existent secret should fail
 		err = secrets.Remove(connText, "nosecret")
-		Expect(err).To(Not(BeNil()))
+		Expect(err).To(HaveOccurred())
 		code, _ := bindings.CheckResponseCode(err)
 		Expect(code).To(BeNumerically("==", http.StatusNotFound))
 	})

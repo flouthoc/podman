@@ -1,17 +1,20 @@
 package images
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/image/v5/types"
 )
 
 // searchOptionsWrapper wraps entities.ImagePullOptions and prevents leaking
@@ -19,8 +22,11 @@ import (
 type searchOptionsWrapper struct {
 	entities.ImageSearchOptions
 	// CLI only flags
-	TLSVerifyCLI bool   // Used to convert to an optional bool later
-	Format       string // For go templating
+	Compatible     bool // Docker compat
+	CredentialsCLI string
+	TLSVerifyCLI   bool   // Used to convert to an optional bool later
+	Format         string // For go templating
+	NoTrunc        bool
 }
 
 // listEntryTag is a utility structure used for json serialization.
@@ -78,40 +84,50 @@ func searchFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 
 	filterFlagName := "filter"
-	flags.StringSliceVarP(&searchOptions.Filters, filterFlagName, "f", []string{}, "Filter output based on conditions provided (default [])")
-	//TODO add custom filter function
-	_ = cmd.RegisterFlagCompletionFunc(filterFlagName, completion.AutocompleteNone)
+	flags.StringArrayVarP(&searchOptions.Filters, filterFlagName, "f", []string{}, "Filter output based on conditions provided (default [])")
+	_ = cmd.RegisterFlagCompletionFunc(filterFlagName, common.AutocompleteImageSearchFilters)
 
 	formatFlagName := "format"
 	flags.StringVar(&searchOptions.Format, formatFlagName, "", "Change the output format to JSON or a Go template")
-	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, completion.AutocompleteNone)
+	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.ImageSearchReport{}))
 
 	limitFlagName := "limit"
 	flags.IntVar(&searchOptions.Limit, limitFlagName, 0, "Limit the number of results")
 	_ = cmd.RegisterFlagCompletionFunc(limitFlagName, completion.AutocompleteNone)
 
 	flags.BoolVar(&searchOptions.NoTrunc, "no-trunc", false, "Do not truncate the output")
+	flags.BoolVar(&searchOptions.Compatible, "compatible", false, "List stars, official and automated columns (Docker compatibility)")
 
 	authfileFlagName := "authfile"
 	flags.StringVar(&searchOptions.Authfile, authfileFlagName, auth.GetDefaultAuthFile(), "Path of the authentication file. Use REGISTRY_AUTH_FILE environment variable to override")
 	_ = cmd.RegisterFlagCompletionFunc(authfileFlagName, completion.AutocompleteDefault)
 
+	credsFlagName := "creds"
+	flags.StringVar(&searchOptions.CredentialsCLI, credsFlagName, "", "`Credentials` (USERNAME:PASSWORD) to use for authenticating to a registry")
+	_ = cmd.RegisterFlagCompletionFunc(credsFlagName, completion.AutocompleteNone)
+
 	flags.BoolVar(&searchOptions.TLSVerifyCLI, "tls-verify", true, "Require HTTPS and verify certificates when contacting registries")
 	flags.BoolVar(&searchOptions.ListTags, "list-tags", false, "List the tags of the input registry")
+
+	if !registry.IsRemote() {
+		certDirFlagName := "cert-dir"
+		flags.StringVar(&searchOptions.CertDir, certDirFlagName, "", "`Pathname` of a directory containing TLS certificates and keys")
+		_ = cmd.RegisterFlagCompletionFunc(certDirFlagName, completion.AutocompleteDefault)
+	}
 }
 
 // imageSearch implements the command for searching images.
 func imageSearch(cmd *cobra.Command, args []string) error {
-	searchTerm := ""
+	var searchTerm string
 	switch len(args) {
 	case 1:
 		searchTerm = args[0]
 	default:
-		return errors.Errorf("search requires exactly one argument")
+		return errors.New("search requires exactly one argument")
 	}
 
 	if searchOptions.ListTags && len(searchOptions.Filters) != 0 {
-		return errors.Errorf("filters are not applicable to list tags result")
+		return errors.New("filters are not applicable to list tags result")
 	}
 
 	// TLS verification in c/image is controlled via a `types.OptionalBool`
@@ -122,65 +138,81 @@ func imageSearch(cmd *cobra.Command, args []string) error {
 		searchOptions.SkipTLSVerify = types.NewOptionalBool(!searchOptions.TLSVerifyCLI)
 	}
 
-	if searchOptions.Authfile != "" {
-		if _, err := os.Stat(searchOptions.Authfile); err != nil {
+	if cmd.Flags().Changed("authfile") {
+		if err := auth.CheckAuthFile(searchOptions.Authfile); err != nil {
 			return err
 		}
 	}
 
-	searchReport, err := registry.ImageEngine().Search(registry.GetContext(), searchTerm, searchOptions.ImageSearchOptions)
+	if searchOptions.CredentialsCLI != "" {
+		creds, err := util.ParseRegistryCreds(searchOptions.CredentialsCLI)
+		if err != nil {
+			return err
+		}
+		searchOptions.Username = creds.Username
+		searchOptions.Password = creds.Password
+	}
+
+	searchReport, err := registry.ImageEngine().Search(registry.Context(), searchTerm, searchOptions.ImageSearchOptions)
 	if err != nil {
 		return err
 	}
-
 	if len(searchReport) == 0 {
 		return nil
 	}
 
-	hdrs := report.Headers(entities.ImageSearchReport{}, nil)
-	renderHeaders := true
-	var row string
+	isJSON := report.IsJSON(searchOptions.Format)
+	for i, element := range searchReport {
+		d := strings.ReplaceAll(element.Description, "\n", " ")
+		if len(d) > 44 && (!searchOptions.NoTrunc && !isJSON) {
+			d = strings.TrimSpace(d[:44]) + "..."
+		}
+		searchReport[i].Description = d
+	}
+
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+
 	switch {
 	case searchOptions.ListTags:
 		if len(searchOptions.Filters) != 0 {
-			return errors.Errorf("filters are not applicable to list tags result")
+			return errors.New("filters are not applicable to list tags result")
 		}
-		if report.IsJSON(searchOptions.Format) {
+		if isJSON {
 			listTagsEntries := buildListTagsJSON(searchReport)
 			return printArbitraryJSON(listTagsEntries)
 		}
-		row = "{{.Name}}\t{{.Tag}}\n"
-	case report.IsJSON(searchOptions.Format):
+		if cmd.Flags().Changed("format") {
+			rpt, err = rpt.Parse(report.OriginUser, searchOptions.Format)
+		} else {
+			rpt, err = rpt.Parse(report.OriginPodman, "{{range .}}{{.Name}}\t{{.Tag}}\n{{end -}}")
+		}
+	case isJSON:
 		return printArbitraryJSON(searchReport)
 	case cmd.Flags().Changed("format"):
-		renderHeaders = report.HasTable(searchOptions.Format)
-		row = report.NormalizeFormat(searchOptions.Format)
+		rpt, err = rpt.Parse(report.OriginUser, searchOptions.Format)
 	default:
-		row = "{{.Index}}\t{{.Name}}\t{{.Description}}\t{{.Stars}}\t{{.Official}}\t{{.Automated}}\n"
+		row := "{{.Name}}\t{{.Description}}"
+		if searchOptions.Compatible {
+			row += "\t{{.Stars}}\t{{.Official}}\t{{.Automated}}"
+		}
+		row = "{{range . }}" + row + "\n{{end -}}"
+		rpt, err = rpt.Parse(report.OriginPodman, row)
 	}
-	format := report.EnforceRange(row)
-
-	tmpl, err := report.NewTemplate("search").Parse(format)
 	if err != nil {
 		return err
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	defer w.Flush()
-
-	if renderHeaders {
-		if err := tmpl.Execute(w, hdrs); err != nil {
-			return errors.Wrapf(err, "failed to write search column headers")
+	if rpt.RenderHeaders {
+		hdrs := report.Headers(entities.ImageSearchReport{}, nil)
+		if err := rpt.Execute(hdrs); err != nil {
+			return fmt.Errorf("failed to write report column headers: %w", err)
 		}
 	}
-
-	return tmpl.Execute(w, searchReport)
+	return rpt.Execute(searchReport)
 }
 
-func printArbitraryJSON(v interface{}) error {
+func printArbitraryJSON(v any) error {
 	prettyJSON, err := json.MarshalIndent(v, "", "    ")
 	if err != nil {
 		return err
@@ -190,7 +222,7 @@ func printArbitraryJSON(v interface{}) error {
 }
 
 func buildListTagsJSON(searchReport []entities.ImageSearchReport) []listEntryTag {
-	entries := []listEntryTag{}
+	entries := make([]listEntryTag, 0)
 
 ReportLoop:
 	for _, report := range searchReport {

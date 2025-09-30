@@ -13,10 +13,14 @@ func TestStartAndStopMultipleRegistries(t *testing.T) {
 
 	registries := []*Registry{}
 
+	registryOptions := &Options{
+		PodmanPath: "../../bin/podman",
+	}
+
 	// Start registries.
 	var errors *multierror.Error
-	for i := 0; i < 3; i++ {
-		reg, err := Start()
+	for range 3 {
+		reg, err := StartWithOptions(registryOptions)
 		if err != nil {
 			errors = multierror.Append(errors, err)
 			continue

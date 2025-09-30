@@ -3,18 +3,18 @@ package images
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"strconv"
 
-	"github.com/containers/podman/v3/pkg/auth"
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/errorhandling"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/pkg/auth"
+	"github.com/containers/podman/v5/pkg/bindings"
+	"github.com/containers/podman/v5/pkg/domain/entities/types"
+	"github.com/containers/podman/v5/pkg/errorhandling"
+	imgTypes "go.podman.io/image/v5/types"
 )
 
 // Pull is the binding for libpod's v2 endpoints for pulling images.  Note that
@@ -35,19 +35,18 @@ func Pull(ctx context.Context, rawImage string, options *PullOptions) ([]string,
 	}
 	params.Set("reference", rawImage)
 
+	// SkipTLSVerify is special.  It's not being serialized by ToParams()
+	// because we need to flip the boolean.
 	if options.SkipTLSVerify != nil {
-		params.Del("SkipTLSVerify")
-		// Note: we have to verify if skipped is false.
 		params.Set("tlsVerify", strconv.FormatBool(!options.GetSkipTLSVerify()))
 	}
 
-	// TODO: have a global system context we can pass around (1st argument)
-	header, err := auth.Header(nil, auth.XRegistryAuthHeader, options.GetAuthfile(), options.GetUsername(), options.GetPassword())
+	header, err := auth.MakeXRegistryAuthHeader(&imgTypes.SystemContext{AuthFilePath: options.GetAuthfile()}, options.GetUsername(), options.GetPassword())
 	if err != nil {
 		return nil, err
 	}
 
-	response, err := conn.DoRequest(nil, http.MethodPost, "/images/pull", params, header)
+	response, err := conn.DoRequest(ctx, nil, http.MethodPost, "/images/pull", params, header)
 	if err != nil {
 		return nil, err
 	}
@@ -57,41 +56,53 @@ func Pull(ctx context.Context, rawImage string, options *PullOptions) ([]string,
 		return nil, response.Process(err)
 	}
 
-	// Historically pull writes status to stderr
-	stderr := io.Writer(os.Stderr)
+	var writer io.Writer
 	if options.GetQuiet() {
-		stderr = ioutil.Discard
+		writer = io.Discard
+	} else if progressWriter := options.GetProgressWriter(); progressWriter != nil {
+		writer = progressWriter
+	} else {
+		// Historically push writes status to stderr
+		writer = os.Stderr
 	}
 
 	dec := json.NewDecoder(response.Body)
 	var images []string
 	var pullErrors []error
+LOOP:
 	for {
-		var report entities.ImagePullReport
+		var report types.ImagePullReport
 		if err := dec.Decode(&report); err != nil {
 			if errors.Is(err, io.EOF) {
+				// end of stream, exit loop
 				break
 			}
-			report.Error = err.Error() + "\n"
+			// Decoder error, it is unlikely that the next call would work again
+			// so exit here as well, the Decoder can store the error and always
+			// return the same one for all future calls which then causes a
+			// infinity loop and memory leak in pullErrors.
+			// https://github.com/containers/podman/issues/25974
+			pullErrors = append(pullErrors, fmt.Errorf("failed to decode message from stream: %w", err))
+			break
 		}
 
 		select {
 		case <-response.Request.Context().Done():
-			break
+			break LOOP
 		default:
 			// non-blocking select
 		}
 
 		switch {
 		case report.Stream != "":
-			fmt.Fprint(stderr, report.Stream)
+			fmt.Fprint(writer, report.Stream)
 		case report.Error != "":
 			pullErrors = append(pullErrors, errors.New(report.Error))
 		case len(report.Images) > 0:
 			images = report.Images
 		case report.ID != "":
 		default:
-			return images, errors.Errorf("failed to parse pull results stream, unexpected input: %v", report)
+			return images, fmt.Errorf("failed to parse pull results stream, unexpected input: %v", report)
 		}
 	}
 	return images, errorhandling.JoinErrors(pullErrors)

@@ -1,8 +1,8 @@
 package network
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -10,7 +10,7 @@ var (
 	networkExistsDescription = `If the named network exists, podman network exists exits with 0, otherwise the exit code will be 1.`
 	networkExistsCommand     = &cobra.Command{
 		Use:               "exists NETWORK",
-		Short:             "network exists",
+		Short:             "Check if network exists",
 		Long:              networkExistsDescription,
 		RunE:              networkExists,
 		Example:           `podman network exists net1`,
@@ -27,7 +27,7 @@ func init() {
 }
 
 func networkExists(cmd *cobra.Command, args []string) error {
-	response, err := registry.ContainerEngine().NetworkExists(registry.GetContext(), args[0])
+	response, err := registry.ContainerEngine().NetworkExists(registry.Context(), args[0])
 	if err != nil {
 		return err
 	}

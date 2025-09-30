@@ -2,24 +2,25 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
 )
 
 var (
 	createCmd = &cobra.Command{
 		Use:   "create [options] NAME FILE|-",
 		Short: "Create a new secret",
-		Long:  "Create a secret. Input can be a path to a file or \"-\" (read from stdin). Default driver is file (unencrypted).",
+		Long:  "Create a secret. Input can be a path to a file or \"-\" (read from stdin). Secret drivers \"file\" (default), \"pass\", and \"shell\" are available.",
 		RunE:  create,
 		Args:  cobra.ExactArgs(2),
 		Example: `podman secret create mysecret /path/to/secret
@@ -31,6 +32,7 @@ var (
 var (
 	createOpts = entities.SecretCreateOptions{}
 	env        = false
+	labels     []string
 )
 
 func init() {
@@ -38,37 +40,50 @@ func init() {
 		Command: createCmd,
 		Parent:  secretCmd,
 	})
+	cfg := registry.PodmanConfig()
 
 	flags := createCmd.Flags()
 
 	driverFlagName := "driver"
-	optsFlagName := "driver-opts"
-
-	cfg := registry.PodmanConfig()
-
-	flags.StringVar(&createOpts.Driver, driverFlagName, cfg.Secrets.Driver, "Specify secret driver")
-	flags.StringToStringVar(&createOpts.DriverOpts, optsFlagName, cfg.Secrets.Opts, "Specify driver specific options")
+	flags.StringVarP(&createOpts.Driver, driverFlagName, "d", cfg.ContainersConfDefaultsRO.Secrets.Driver, "Specify secret driver")
 	_ = createCmd.RegisterFlagCompletionFunc(driverFlagName, completion.AutocompleteNone)
+
+	optsFlagName := "driver-opts"
+	flags.StringToStringVar(&createOpts.DriverOpts, optsFlagName, cfg.ContainersConfDefaultsRO.Secrets.Opts, "Specify driver specific options")
 	_ = createCmd.RegisterFlagCompletionFunc(optsFlagName, completion.AutocompleteNone)
 
 	envFlagName := "env"
 	flags.BoolVar(&env, envFlagName, false, "Read secret data from environment variable")
+
+	flags.BoolVar(&createOpts.Replace, "replace", false, "If a secret with the same name exists, replace it")
+
+	flags.BoolVar(&createOpts.Ignore, "ignore", false, "If a secret with the same name exists, ignore and do not create a new secret")
+
+	labelFlagName := "label"
+	flags.StringArrayVarP(&labels, labelFlagName, "l", nil, "Specify labels on the secret")
+	_ = createCmd.RegisterFlagCompletionFunc(labelFlagName, completion.AutocompleteNone)
 }
 
 func create(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
+	// Validate that --ignore and --replace are not used together
+	if createOpts.Ignore && createOpts.Replace {
+		return errors.New("cannot use --ignore and --replace flags together")
+	}
+
 	var err error
 	path := args[1]
 
 	var reader io.Reader
-	if env {
+	switch {
+	case env:
 		envValue := os.Getenv(path)
 		if envValue == "" {
-			return errors.Errorf("cannot create store secret data: environment variable %s is not set", path)
+			return fmt.Errorf("cannot create store secret data: environment variable %s is not set", path)
 		}
 		reader = strings.NewReader(envValue)
-	} else if path == "-" || path == "/dev/stdin" {
+	case path == "-" || path == "/dev/stdin":
 		stat, err := os.Stdin.Stat()
 		if err != nil {
 			return err
@@ -77,13 +92,18 @@ func create(cmd *cobra.Command, args []string) error {
 			return errors.New("if `-` is used, data must be passed into stdin")
 		}
 		reader = os.Stdin
-	} else {
+	default:
 		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
 		reader = file
+	}
+
+	createOpts.Labels, err = parse.GetAllLabels([]string{}, labels)
+	if err != nil {
+		return fmt.Errorf("unable to process labels: %w", err)
 	}
 
 	report, err := registry.ContainerEngine().SecretCreate(context.Background(), name, reader, createOpts)

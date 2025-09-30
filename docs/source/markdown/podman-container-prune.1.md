@@ -1,4 +1,4 @@
-% podman-container-prune(1)
+% podman-container-prune 1
 
 ## NAME
 podman\-container\-prune - Remove all stopped containers from local storage
@@ -18,14 +18,14 @@ The *filters* argument format is of `key=value`. If there is more than one *filt
 
 Supported filters:
 
-| Filter             | Description                                                                 |
-| :----------------: | --------------------------------------------------------------------------- |
-| *until*            | Only remove containers and images created before given timestamp.           |
-| *label*            | Only remove containers and images, with (or without, in the case of label!=[...] is used) the specified labels.                  |
+| Filter | Description                                                                                          |
+|:------:|------------------------------------------------------------------------------------------------------|
+| label  | Only remove containers, with (or without, in the case of label!=[...] is used) the specified labels. |
+| until  | Only remove containers created before given timestamp.                                               |
+
+The `label` *filter* accepts two formats. One is the `label`=*key* or `label`=*key*=*value*, which removes containers with the specified labels. The other format is the `label!`=*key* or `label!`=*key*=*value*, which removes containers without the specified labels.
 
 The `until` *filter* can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. 10m, 1h30m) computed relative to the machine’s time.
-
-The `label` *filter* accepts two formats. One is the `label`=*key*, `label`=*key*=*value*, which removes containers with the specified labels. The other format is the `label!`=*key*, or `label!`=*key*=*value*, which removes containers without the specified labels.
 
 #### **--force**, **-f**
 
@@ -38,7 +38,7 @@ Print usage statement.\
 The default is **false**.
 
 ## EXAMPLES
-Remove all stopped containers from local storage
+Remove all stopped containers from local storage:
 ```
 $ podman container prune
 WARNING! This will remove all stopped containers.
@@ -51,7 +51,7 @@ fff1c5b6c3631746055ec40598ce8ecaa4b82aef122f9e3a85b03b55c0d06c23
 602d343cd47e7cb3dfc808282a9900a3e4555747787ec6723bb68cedab8384d5
 ```
 
-Remove all stopped containers from local storage without confirmation.
+Remove all stopped containers from local storage without confirmation:
 ```
 $ podman container prune -f
 878392adf2e6c5c9bb1fc19b69d37d2e98c8abf9d539c0bce4b15b46bbcce471
@@ -62,7 +62,7 @@ fff1c5b6c3631746055ec40598ce8ecaa4b82aef122f9e3a85b03b55c0d06c23
 602d343cd47e7cb3dfc808282a9900a3e4555747787ec6723bb68cedab8384d5
 ```
 
-Remove all stopped containers from local storage created within last 10 minutes
+Remove all stopped containers from local storage created before the last 10 minutes:
 ```
 $ podman container prune --filter until="10m"
 WARNING! This will remove all stopped containers.
@@ -71,7 +71,7 @@ Are you sure you want to continue? [y/N] y
 ```
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[podman-ps](podman-ps.1.md)**
+**[podman(1)](podman.1.md)**, **[podman-ps(1)](podman-ps.1.md)**
 
 ## HISTORY
 December 2018, Originally compiled by Brent Baude <bbaude@redhat.com>\

@@ -2,23 +2,27 @@ package buildah
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
+	"slices"
 	"strings"
 
 	"github.com/containers/buildah/define"
-	"github.com/containers/buildah/pkg/blobcache"
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/image"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/image/v5/transports"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage"
 	digest "github.com/opencontainers/go-digest"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/openshift/imagebuilder"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/image"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/pkg/shortnames"
+	"go.podman.io/image/v5/transports"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 const (
@@ -47,6 +51,15 @@ func getImageName(name string, img *storage.Image) string {
 
 func imageNamePrefix(imageName string) string {
 	prefix := imageName
+	if d, err := digest.Parse(imageName); err == nil {
+		prefix = d.Encoded()
+		if len(prefix) > 12 {
+			prefix = prefix[:12]
+		}
+	}
+	if stringid.ValidateID(prefix) == nil {
+		prefix = stringid.TruncateID(prefix)
+	}
 	s := strings.Split(prefix, ":")
 	if len(s) > 0 {
 		prefix = s[0]
@@ -65,15 +78,20 @@ func imageNamePrefix(imageName string) string {
 func newContainerIDMappingOptions(idmapOptions *define.IDMappingOptions) storage.IDMappingOptions {
 	var options storage.IDMappingOptions
 	if idmapOptions != nil {
-		options.HostUIDMapping = idmapOptions.HostUIDMapping
-		options.HostGIDMapping = idmapOptions.HostGIDMapping
-		uidmap, gidmap := convertRuntimeIDMaps(idmapOptions.UIDMap, idmapOptions.GIDMap)
-		if len(uidmap) > 0 && len(gidmap) > 0 {
-			options.UIDMap = uidmap
-			options.GIDMap = gidmap
+		if idmapOptions.AutoUserNs {
+			options.AutoUserNs = true
+			options.AutoUserNsOpts = idmapOptions.AutoUserNsOpts
 		} else {
-			options.HostUIDMapping = true
-			options.HostGIDMapping = true
+			options.HostUIDMapping = idmapOptions.HostUIDMapping
+			options.HostGIDMapping = idmapOptions.HostGIDMapping
+			uidmap, gidmap := convertRuntimeIDMaps(idmapOptions.UIDMap, idmapOptions.GIDMap)
+			if len(uidmap) > 0 && len(gidmap) > 0 {
+				options.UIDMap = uidmap
+				options.GIDMap = gidmap
+			} else {
+				options.HostUIDMapping = true
+				options.HostGIDMapping = true
+			}
 		}
 	}
 	return options
@@ -81,10 +99,8 @@ func newContainerIDMappingOptions(idmapOptions *define.IDMappingOptions) storage
 
 func containerNameExist(name string, containers []storage.Container) bool {
 	for _, container := range containers {
-		for _, cname := range container.Names {
-			if cname == name {
-				return true
-			}
+		if slices.Contains(container.Names, name) {
+			return true
 		}
 	}
 	return false
@@ -111,9 +127,20 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 		options.FromImage = ""
 	}
 
+	if options.NetworkInterface == nil {
+		// create the network interface
+		// Note: It is important to do this before we pull any images/create containers.
+		// The default backend detection logic needs an empty store to correctly detect
+		// that we can use netavark, if the store was not empty it will use CNI to not break existing installs.
+		options.NetworkInterface, err = getNetworkInterface(store, options.CNIConfigDir, options.CNIPluginPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	systemContext := getSystemContext(store, options.SystemContext, options.SignaturePolicyPath)
 
-	if options.FromImage != "" && options.FromImage != "scratch" {
+	if options.FromImage != "" && options.FromImage != BaseImageFakeName {
 		imageRuntime, err := libimage.RuntimeFromStore(store, &libimage.RuntimeOptions{SystemContext: systemContext})
 		if err != nil {
 			return nil, err
@@ -132,13 +159,10 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 		pullOptions.OciDecryptConfig = options.OciDecryptConfig
 		pullOptions.SignaturePolicyPath = options.SignaturePolicyPath
 		pullOptions.Writer = options.ReportWriter
+		pullOptions.DestinationLookupReferenceFunc = cacheLookupReferenceFunc(options.BlobDirectory, types.PreserveOriginal)
 
 		maxRetries := uint(options.MaxPullRetries)
 		pullOptions.MaxRetries = &maxRetries
-
-		if options.BlobDirectory != "" {
-			pullOptions.DestinationLookupReferenceFunc = blobcache.CacheLookupReferenceFunc(options.BlobDirectory, types.PreserveOriginal)
-		}
 
 		pulledImages, err := imageRuntime.Pull(ctx, options.FromImage, pullPolicy, &pullOptions)
 		if err != nil {
@@ -166,35 +190,41 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 	if ref != nil {
 		srcSrc, err := ref.NewImageSource(ctx, systemContext)
 		if err != nil {
-			return nil, errors.Wrapf(err, "error instantiating image for %q", transports.ImageName(ref))
+			return nil, fmt.Errorf("instantiating image for %q: %w", transports.ImageName(ref), err)
 		}
 		defer srcSrc.Close()
-		manifestBytes, manifestType, err := srcSrc.GetManifest(ctx, nil)
+		unparsedTop := image.UnparsedInstance(srcSrc, nil)
+		manifestBytes, manifestType, err := unparsedTop.Manifest(ctx)
 		if err != nil {
-			return nil, errors.Wrapf(err, "error loading image manifest for %q", transports.ImageName(ref))
+			return nil, fmt.Errorf("loading image manifest for %q: %w", transports.ImageName(ref), err)
 		}
 		if manifestDigest, err := manifest.Digest(manifestBytes); err == nil {
 			imageDigest = manifestDigest.String()
 		}
 		var instanceDigest *digest.Digest
+		unparsedInstance := unparsedTop // for instanceDigest
 		if manifest.MIMETypeIsMultiImage(manifestType) {
 			list, err := manifest.ListFromBlob(manifestBytes, manifestType)
 			if err != nil {
-				return nil, errors.Wrapf(err, "error parsing image manifest for %q as list", transports.ImageName(ref))
+				return nil, fmt.Errorf("parsing image manifest for %q as list: %w", transports.ImageName(ref), err)
 			}
 			instance, err := list.ChooseInstance(systemContext)
 			if err != nil {
-				return nil, errors.Wrapf(err, "error finding an appropriate image in manifest list %q", transports.ImageName(ref))
+				return nil, fmt.Errorf("finding an appropriate image in manifest list %q: %w", transports.ImageName(ref), err)
 			}
 			instanceDigest = &instance
+			unparsedInstance = image.UnparsedInstance(srcSrc, instanceDigest)
 		}
-		src, err = image.FromUnparsedImage(ctx, systemContext, image.UnparsedInstance(srcSrc, instanceDigest))
+		src, err = image.FromUnparsedImage(ctx, systemContext, unparsedInstance)
 		if err != nil {
-			return nil, errors.Wrapf(err, "error instantiating image for %q instance %q", transports.ImageName(ref), instanceDigest)
+			return nil, fmt.Errorf("instantiating image for %q instance %q: %w", transports.ImageName(ref), instanceDigest, err)
 		}
 	}
 
 	name := "working-container"
+	if options.ContainerSuffix != "" {
+		name = options.ContainerSuffix
+	}
 	if options.Container != "" {
 		name = options.Container
 	} else {
@@ -207,16 +237,26 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 	if options.Container == "" {
 		containers, err := store.Containers()
 		if err != nil {
-			return nil, errors.Wrapf(err, "unable to check for container names")
+			return nil, fmt.Errorf("unable to check for container names: %w", err)
 		}
 		tmpName = findUnusedContainer(tmpName, containers)
 	}
 
-	conflict := 100
+	suffixDigitsModulo := 100
 	for {
+		var flags map[string]any
+		// check if we have predefined ProcessLabel and MountLabel
+		// this could be true if this is another stage in a build
+		if options.ProcessLabel != "" && options.MountLabel != "" {
+			flags = map[string]any{
+				"ProcessLabel": options.ProcessLabel,
+				"MountLabel":   options.MountLabel,
+			}
+		}
 		coptions := storage.ContainerOptions{
 			LabelOpts:        options.CommonBuildOpts.LabelOpts,
 			IDMappingOptions: newContainerIDMappingOptions(options.IDMappingOptions),
+			Flags:            flags,
 			Volatile:         true,
 		}
 		container, err = store.CreateContainer("", []string{tmpName}, imageID, "", "", &coptions)
@@ -224,11 +264,13 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 			name = tmpName
 			break
 		}
-		if errors.Cause(err) != storage.ErrDuplicateName || options.Container != "" {
-			return nil, errors.Wrapf(err, "error creating container")
+		if !errors.Is(err, storage.ErrDuplicateName) || options.Container != "" {
+			return nil, fmt.Errorf("creating container: %w", err)
 		}
-		tmpName = fmt.Sprintf("%s-%d", name, rand.Int()%conflict)
-		conflict = conflict * 10
+		tmpName = fmt.Sprintf("%s-%d", name, rand.Int()%suffixDigitsModulo)
+		if suffixDigitsModulo < 1_000_000_000 {
+			suffixDigitsModulo *= 10
+		}
 	}
 	defer func() {
 		if err != nil {
@@ -254,6 +296,7 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 		FromImage:             imageSpec,
 		FromImageID:           imageID,
 		FromImageDigest:       imageDigest,
+		GroupAdd:              options.GroupAdd,
 		Container:             name,
 		ContainerID:           container.ID,
 		ImageAnnotations:      map[string]string{},
@@ -272,28 +315,43 @@ func newBuilder(ctx context.Context, store storage.Store, options BuilderOptions
 			UIDMap:         uidmap,
 			GIDMap:         gidmap,
 		},
-		Capabilities:    copyStringSlice(options.Capabilities),
-		CommonBuildOpts: options.CommonBuildOpts,
-		TopLayer:        topLayer,
-		Args:            options.Args,
-		Format:          options.Format,
-		TempVolumes:     map[string]bool{},
-		Devices:         options.Devices,
+		Capabilities:     slices.Clone(options.Capabilities),
+		CommonBuildOpts:  options.CommonBuildOpts,
+		TopLayer:         topLayer,
+		Args:             maps.Clone(options.Args),
+		Format:           options.Format,
+		Devices:          options.Devices,
+		DeviceSpecs:      options.DeviceSpecs,
+		Logger:           options.Logger,
+		NetworkInterface: options.NetworkInterface,
+		CDIConfigDir:     options.CDIConfigDir,
 	}
 
 	if options.Mount {
 		_, err = builder.Mount(container.MountLabel())
 		if err != nil {
-			return nil, errors.Wrapf(err, "error mounting build container %q", builder.ContainerID)
+			return nil, fmt.Errorf("mounting build container %q: %w", builder.ContainerID, err)
 		}
 	}
 
-	if err := builder.initConfig(ctx, src); err != nil {
-		return nil, errors.Wrapf(err, "error preparing image configuration")
+	if err := builder.initConfig(ctx, systemContext, src, &options); err != nil {
+		return nil, fmt.Errorf("preparing image configuration: %w", err)
 	}
+
+	if !options.PreserveBaseImageAnns {
+		builder.SetAnnotation(v1.AnnotationBaseImageDigest, imageDigest)
+		if !shortnames.IsShortName(imageSpec) {
+			// If the base image was specified as a fully-qualified
+			// image name, let's set it.
+			builder.SetAnnotation(v1.AnnotationBaseImageName, imageSpec)
+		} else {
+			builder.UnsetAnnotation(v1.AnnotationBaseImageName)
+		}
+	}
+
 	err = builder.Save()
 	if err != nil {
-		return nil, errors.Wrapf(err, "error saving builder state for container %q", builder.ContainerID)
+		return nil, fmt.Errorf("saving builder state for container %q: %w", builder.ContainerID, err)
 	}
 
 	return builder, nil

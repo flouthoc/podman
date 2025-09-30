@@ -1,13 +1,14 @@
 package containers
 
 import (
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/diff"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"errors"
+
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/diff"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 )
 
@@ -32,12 +33,8 @@ func init() {
 		Parent:  containerCmd,
 	})
 
-	diffOpts = &entities.DiffOptions{}
+	diffOpts = new(entities.DiffOptions)
 	flags := diffCmd.Flags()
-
-	// FIXME: Why does this exists? It is not used anywhere.
-	flags.BoolVar(&diffOpts.Archive, "archive", true, "Save the diff as a tar archive")
-	_ = flags.MarkHidden("archive")
 
 	formatFlagName := "format"
 	flags.StringVar(&diffOpts.Format, formatFlagName, "", "Change the output format (json)")

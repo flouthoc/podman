@@ -15,7 +15,28 @@
 # sys.path.insert(0, os.path.abspath('.'))
 
 import re
-from recommonmark.transform import AutoStructify
+import os
+import subprocess
+
+# Define the canonical URL for our custom docs.podman.io domain configured on Read the Docs
+html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "")
+
+# Tell Jinja2 templates the build is running on Read the Docs
+if os.environ.get("READTHEDOCS", "") == "True":
+    if "html_context" not in globals():
+        html_context = {}
+    html_context["READTHEDOCS"] = True
+
+# We have to run the preprocessor to create the actual markdown files from .in files.
+# Do it here so the it can work on readthedocs as well.
+path = os.path.join(os.path.abspath(os.path.dirname(
+    __file__)), "../../hack/markdown-preprocess")
+p = subprocess.Popen(path,
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+out, err = p.communicate()
+if p.returncode != 0:
+    raise Exception("failed to run markdown-preprocess", out, err)
+
 
 # -- Project information -----------------------------------------------------
 
@@ -29,7 +50,7 @@ author = "team"
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = ["sphinx_markdown_tables", "recommonmark"]
+extensions = ["myst_parser"]
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -37,13 +58,14 @@ templates_path = ["_templates"]
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = []
+exclude_patterns = ["markdown/options"]
 
 master_doc = "index"
 
 # Configure smartquotes to only transform quotes and ellipses, not dashes
 smartquotes_action = "qe"
 
+locale_dirs = ["locale/"]
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -63,27 +85,23 @@ html_css_files = [
 
 # -- Extension configuration -------------------------------------------------
 
+# IMPORTANT: explicitly unset the extensions, by default dollarmath is enabled.
+# We use the dollar sign as text and do not want it to be interpreted as math expression.
+myst_enable_extensions = []
+
 
 def convert_markdown_title(app, docname, source):
     # Process markdown files only
     docpath = app.env.doc2path(docname)
     if docpath.endswith(".md"):
-        # Convert pandoc title line into eval_rst block for recommonmark
-        source[0] = re.sub(r"^% (.*)", r"```eval_rst\n.. title:: \g<1>\n```", source[0])
-
+        # Convert pandoc title line into eval_rst block for myst_parser
+        #
+        # Remove the ending " 1" (section) to avoid it from being displayed
+        # in the web tab. Often such a text indicates that
+        # a web page got an update. For instance GitHub issues
+        # shows the number of new comments that have been written
+        # after the user's last visit.
+        source[0] = re.sub(r"^% (.*)\s(\d)", r"```{title} \g<1>\n```", source[0])
 
 def setup(app):
     app.connect("source-read", convert_markdown_title)
-
-    app.add_config_value(
-        "recommonmark_config",
-        {
-            "enable_eval_rst": True,
-            "enable_auto_doc_ref": False,
-            "enable_auto_toc_tree": False,
-            "enable_math": False,
-            "enable_inline_math": False,
-        },
-        True,
-    )
-    app.add_transform(AutoStructify)

@@ -1,60 +1,37 @@
-![PODMAN logo](../../logo/podman-logo-source.svg)
+![PODMAN logo](https://raw.githubusercontent.com/containers/common/main/logos/podman-logo-full-vert.png)
 
 # Basic Setup and Use of Podman in a Rootless environment.
 
 Prior to allowing users without root privileges to run Podman, the administrator must install or build Podman and complete the following configurations.
 
-## cgroup V2 support
-
-The cgroup V2  Linux kernel feature allows the user to limit the amount of resources a rootless container can use.  If the Linux distribution that you are running Podman on is enabled with  cgroup V2 then you might need to change the default OCI Runtime. Some older versions of `runc` do not work with cgroup V2, you might have to switch to the alternative OCI runtime `crun`.
-
-The alternative OCI runtime support for cgroup V2 can also be turned on at the command line by using the `--runtime` option:
-
-```
-podman --runtime crun
-```
-or for all commands by changing the value for the "Default OCI runtime" in the `containers.conf` file either at the system level or at the [user level](#user-configuration-files) from `runtime = "runc"` to `runtime = "crun"`.
-
 ## Administrator Actions
 
 ### Installing Podman
 
-For installing Podman, please see the [installation instructions](https://github.com/containers/podman/blob/main/install.md).
+For installing Podman, see the [installation instructions](https://podman.io/getting-started/installation).
 
 ### Building Podman
 
-For building Podman, please see the [installation instructions](https://github.com/containers/podman/blob/main/install.md#building-from-scratch).
+For building Podman, see the [build instructions](https://podman.io/getting-started/installation#building-from-scratch).
 
-### Install `slirp4netns`
+### Networking configuration
 
-The [slirp4netns](https://github.com/rootless-containers/slirp4netns) package provides user-mode networking for unprivileged network namespaces and must be installed on the machine in order for Podman to run in a rootless environment.  The package is available on most Linux distributions via their package distribution software such as `yum`, `dnf`, `apt`, `zypper`, etc.  If the package is not available, you can build and install `slirp4netns` from [GitHub](https://github.com/rootless-containers/slirp4netns).
+A user-mode networking tool for unprivileged network namespaces must be installed on the machine in order for Podman to run in a rootless environment.
 
-### Ensure `fuse-overlayfs` is installed
+Podman supports two rootless networking tools: [pasta](https://passt.top/passt/about/#pasta) (provided by [passt](https://passt.top/passt/about/)) and [slirp4netns](https://github.com/rootless-containers/slirp4netns).
 
-When using Podman in a rootless environment, it is recommended to use `fuse-overlayfs` rather than the VFS file system. For that you need the `fuse-overlayfs` executable available in `$PATH`.
+pasta is the default since Podman 5.0, while slirp4netns was the default for previous versions. Passt is a more modern replacement for SLIRP that amongst other things fully supports IPv6 and is more secure architecturally (runs in a separate process, uses modern Linux mechanisms for isolation etc).
 
-Your distribution might already provide it in the `fuse-overlayfs` package, but be aware that you need at least version **0.7.6**. This especially needs to be checked on Ubuntu distributions as `fuse-overlayfs` is not generally installed by default and the 0.7.6 version is not available natively on Ubuntu releases prior to **20.04**.
+Passt is [available on most Linux distributions](https://passt.top/passt/about/#availability) via their package distribution software such as `yum`, `dnf`, `apt`, `zypper`, etc. under the name `passt`.  If the package is not available, you can build and install `passt` from [its upstream](https://passt.top/passt/about/#try-it).
 
-The `fuse-overlayfs` project is available from [GitHub](https://github.com/containers/fuse-overlayfs), and provides instructions for easily building a static `fuse-overlayfs` executable.
+Alternatively, slirp4netns can be installed in the same fashion either from your distribution's repositories or by following [the instructions](https://github.com/rootless-containers/slirp4netns?tab=readme-ov-file#install) provided on its GitHub.
 
-If Podman is used before `fuse-overlayfs` is installed, it may be necessary to adjust the `storage.conf` file (see "User Configuration Files" below) to change the `driver` option under `[storage]` to `"overlay"` and point the `mount_program` option in `[storage.options]` to the path of the `fuse-overlayfs` executable:
+The major user-facing difference between the two is outlined in [this blog post](https://blog.podman.io/2024/03/podman-5-0-breaking-changes-in-detail/) and expanded upon in **[podman-network(1)](https://github.com/containers/podman/blob/main/docs/source/markdown/podman-network.1.md#pasta)**.
 
-```
-[storage]
-  driver = "overlay"
+> [!note]
+> pasta's default situation of not being being able to communicate between the container and the host has been fixed in Podman 5.3: see [Podman 5.3 changes for improved networking experience with pasta](https://blog.podman.io/2024/10/podman-5-3-changes-for-improved-networking-experience-with-pasta/).
 
-  (...)
-
-[storage.options]
-
-  (...)
-
-  mount_program = "/usr/bin/fuse-overlayfs"
-```
-
-### Enable user namespaces (on RHEL7 machines)
-
-The number of user namespaces that are allowed on the system is specified in the file `/proc/sys/user/max_user_namespaces`.  On most Linux platforms this is preset by default and no adjustment is necessary.  However, on RHEL7 machines, a user with root privileges may need to set that to a reasonable value by using this command:  `sysctl user.max_user_namespaces=15000`.
+The default rootless networking tool can be selected in **[containers.conf(5)](https://github.com/containers/common/blob/main/docs/containers.conf.5.md)** under the `[network]` section with `default_rootless_network_cmd`, which can be set to `pasta` (default) or `slirp4netns`.
 
 ### `/etc/subuid` and `/etc/subgid` configuration
 
@@ -63,7 +40,7 @@ Rootless Podman requires the user running it to have a range of UIDs listed in t
 For each user that will be allowed to create containers, update `/etc/subuid` and `/etc/subgid` for the user with fields that look like the following.  Note that the values for each user must be unique.  If there is overlap, there is a potential for a user to use another user's namespace and they could corrupt it.
 
 ```
-cat /etc/subuid
+# cat /etc/subuid
 johndoe:100000:65536
 test:165536:65536
 ```
@@ -76,18 +53,48 @@ The format of this file is `USERNAME:UID:RANGE`
 
 This means the user `johndoe` is allocated UIDs 100000-165535 as well as their standard UID in the `/etc/passwd` file.  NOTE: this is not currently supported with network installs; these files must be available locally to the host machine.  It is not possible to configure this with LDAP or Active Directory.
 
-If you update either `/etc/subuid` or `/etc/subgid`, you need to stop all the running containers owned by the user and kill the pause process that is running on the system for that user.  This can be done automatically by using the [`podman system migrate`](https://github.com/containers/podman/blob/main/docs/source/markdown/podman-system-migrate.1.md) command which will stop all the containers for the user and will kill the pause process.
-
 Rather than updating the files directly, the `usermod` program can be used to assign UIDs and GIDs to a user.
 
 ```
-usermod --add-subuids 200000-201000 --add-subgids 200000-201000 johndoe
+# usermod --add-subuids 100000-165535 --add-subgids 100000-165535 johndoe
 grep johndoe /etc/subuid /etc/subgid
-/etc/subuid:johndoe:200000:1001
-/etc/subgid:johndoe:200000:1001
+/etc/subuid:johndoe:100000:65536
+/etc/subgid:johndoe:100000:65536
+```
+
+If you update either `/etc/subuid` or `/etc/subgid`, you need to stop all the running containers owned by the user and kill the pause process that is running on the system for that user.  This can be done automatically by running [`podman system migrate`](https://github.com/containers/podman/blob/main/docs/source/markdown/podman-system-migrate.1.md) as that user.
+
+#### Giving access to additional groups
+
+Users can fully map additional groups to a container namespace if
+those groups subordinated to the user:
+
+```
+# usermod --add-subgids 2000-2000 johndoe
+grep johndoe /etc/subgid
+```
+
+This means the user `johndoe` can "impersonate" the group `2000` inside the
+container. Note that it is usually not a good idea to subordinate active
+user ids to other users, because it would allow user impersonation.
+
+`johndoe` can use `--group-add keep-groups` to preserve the additional
+groups, and `--gidmap="+g102000:@2000"` to map the group `2000` in the host
+to the group `102000` in the container:
+
+```
+$ podman run \
+  --rm \
+  --group-add keep-groups \
+  --gidmap="+g102000:@2000" \
+  --volume "$PWD:/data:ro" \
+  --workdir /data \
+  alpine ls -lisa
 ```
 
 ### Enable unprivileged `ping`
+
+(It is very unlikely that you will need to do this on a modern distro).
 
 Users running in a non-privileged container may not be able to use the `ping` utility from that container.
 
@@ -106,24 +113,34 @@ Once the Administrator has completed the setup on the machine and then the confi
 
 ### User Configuration Files
 
-The Podman configuration files for root reside in `/usr/share/containers` with overrides in `/etc/containers`.  In the rootless environment they reside in `${XDG_CONFIG_HOME}/containers` (usually `~/.config/containers`) and are owned by each individual user.
+The Podman configuration files for root reside in `/usr/share/containers` with overrides in `/etc/containers`.  In the rootless environment they reside in `${XDG_CONFIG_HOME}/containers` and are owned by each individual user.
+
+Note: in environments without `XDG` environment variables, Podman internally sets the following defaults:
+
+- `$XDG_CONFIG_HOME` = `$HOME/.config`
+- `$XDG_DATA_HOME` = `$HOME/.local/share`
+- `$XDG_RUNTIME_DIR` =
+  - `/run/user/$UID` on `systemd` environments
+  - `$TMPDIR/podman-run-$UID` otherwise
 
 The three main configuration files are [containers.conf](https://github.com/containers/common/blob/main/docs/containers.conf.5.md), [storage.conf](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md) and [registries.conf](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md). The user can modify these files as they wish.
 
 #### containers.conf
 Podman reads
+
 1. `/usr/share/containers/containers.conf`
 2. `/etc/containers/containers.conf`
-3. `$HOME/.config/containers/containers.conf`
+3. `${XDG_CONFIG_HOME}/containers/containers.conf`
 
-if they exist in that order. Each file can override the previous for particular fields.
+if they exist, in that order. Each file can override the previous for particular fields.
 
 #### storage.conf
 For `storage.conf` the order is
-1. `/etc/containers/storage.conf`
-2. `$HOME/.config/containers/storage.conf`
 
-In rootless Podman certain fields in `/etc/containers/storage.conf` are ignored. These fields are:
+1. `/etc/containers/storage.conf`
+2. `${XDG_CONFIG_HOME}/containers/storage.conf`
+
+In rootless Podman, certain fields in `/etc/containers/storage.conf` are ignored. These fields are:
 ```
 graphroot=""
  container storage graph dir (default: "/var/lib/containers/storage")
@@ -135,21 +152,22 @@ runroot=""
 ```
 In rootless Podman these fields default to
 ```
-graphroot="$HOME/.local/share/containers/storage"
-runroot="$XDG_RUNTIME_DIR/containers"
+graphroot="${XDG_DATA_HOME}/containers/storage"
+runroot="${XDG_RUNTIME_DIR}/containers"
 ```
-[$XDG_RUNTIME_DIR](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html#variables) defaults on most systems to `/run/user/$UID`.
+[\$XDG_RUNTIME_DIR](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html#variables) defaults on most systems to `/run/user/$UID`.
 
 #### registries
-Registry configuration is read in by this order
+Registry configuration is read in this order
+
 1. `/etc/containers/registries.conf`
 2. `/etc/containers/registries.d/*`
-3. `HOME/.config/containers/registries.conf`
+3. `${XDG_CONFIG_HOME}/containers/registries.conf`
 
 The files in the home directory should be used to configure rootless Podman for personal needs. These files are not created by default. Users can copy the files from `/usr/share/containers` or `/etc/containers` and modify them.
 
 #### Authorization files
- The default authorization file used by the `podman login` and `podman logout` commands reside in `${XDG_RUNTIME_DIR}/containers/auth.json`.
+The default authorization file used by the `podman login` and `podman logout` commands is `${XDG_RUNTIME_DIR}/containers/auth.json`.
 
 ### Using volumes
 
@@ -160,24 +178,24 @@ If your container runs with the root user, then `root` in the container is actua
 So, for example,
 
 ```
-> whoami
+host$ whoami
 john
 
 # a folder which is empty
-host> ls /home/john/folder
-host> podman run -v /home/john/folder:/container/volume mycontainer /bin/bash
+host$ ls /home/john/folder
+host$ podman run -it -v /home/john/folder:/container/volume mycontainer /bin/bash
 
 # Now I'm in the container
-root@container> whoami
+root@container# whoami
 root
-root@container> touch /container/volume/test
-root@container> ls -l /container/volume
+root@container# touch /container/volume/test
+root@container# ls -l /container/volume
 total 0
 -rw-r--r-- 1 root root 0 May 20 21:47 test
-root@container> exit
+root@container# exit
 
 # I check again
-host> ls -l /home/john/folder
+host$ ls -l /home/john/folder
 total 0
 -rw-r--r-- 1 john john 0 May 20 21:47 test
 ```
@@ -186,10 +204,10 @@ We do recognize that this doesn't really match how many people intend to use roo
 
 It is also helpful to distinguish between running Podman as a rootless user, and a container which is built to run rootless. If the container you're trying to run has a `USER` which is not root, then when mounting volumes you **must** use `--userns=keep-id`. This is because the container user would not be able to become `root` and access the mounted volumes.
 
-Other considerations in regards to volumes:
+Another consideration in regards to volumes:
 
-- You should always give the full path to the volume you'd like to mount
-- The mount point must exist in the container
+- When providing the path of a directory you'd like to bind-mount, the path needs to be provided as an absolute path
+  or a relative path that starts with `.` (a dot), otherwise the string will be interpreted as the name of a named volume.
 
 ## More information
 

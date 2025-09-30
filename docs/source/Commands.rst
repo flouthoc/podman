@@ -5,6 +5,8 @@ Commands
 
 :doc:`Podman <markdown/podman.1>` (Pod Manager) Global Options, Environment Variables, Exit Codes, Configuration Files, and more
 
+:doc:`artifact <markdown/podman-artifact.1>` Manage OCI artifacts
+
 :doc:`attach <markdown/podman-attach.1>` Attach to a running container
 
 :doc:`auto-update <markdown/podman-auto-update.1>` Auto update containers according to their auto-update policy
@@ -13,27 +15,29 @@ Commands
 
 :doc:`commit <markdown/podman-commit.1>` Create new image based on the changed container
 
-:doc:`container <managecontainers>` Manage Containers
+:doc:`container <markdown/podman-container.1>` Manage containers
 
 :doc:`cp <markdown/podman-cp.1>` Copy files/folders between a container and the local filesystem
 
 :doc:`create <markdown/podman-create.1>` Create but do not start a container
 
-:doc:`diff <markdown/podman-diff.1>` Inspect changes on container's file systems
+:doc:`diff <markdown/podman-diff.1>` Display the changes to the object's file system
 
-:doc:`events <markdown/podman-events.1>` Show podman events
+:doc:`events <markdown/podman-events.1>` Show podman system events
 
 :doc:`exec <markdown/podman-exec.1>` Run a process in a running container
 
 :doc:`export <markdown/podman-export.1>` Export container's filesystem contents as a tar archive
 
-:doc:`generate <generate>` Generated structured data
+:doc:`farm <markdown/podman-farm.1>` Farm out builds to remote machines
 
-:doc:`healthcheck <healthcheck>` Manage Healthcheck
+:doc:`generate <markdown/podman-generate.1>` Generate structured data based on containers, pods or volumes
+
+:doc:`healthcheck <markdown/podman-healthcheck.1>` Manage health checks on containers
 
 :doc:`history <markdown/podman-history.1>` Show history of a specified image
 
-:doc:`image <image>` Manage images
+:doc:`image <markdown/podman-image.1>` Manage images
 
 :doc:`images <markdown/podman-images.1>` List images in local storage
 
@@ -43,31 +47,31 @@ Commands
 
 :doc:`init <markdown/podman-init.1>` Initialize one or more containers
 
-:doc:`inspect <markdown/podman-inspect.1>` Display the configuration of a container or image
+:doc:`inspect <markdown/podman-inspect.1>` Display the configuration of object denoted by ID
 
 :doc:`kill <markdown/podman-kill.1>` Kill one or more running containers with a specific signal
 
-:doc:`load <markdown/podman-load.1>` Load an image from container archive
+:doc:`kube <markdown/podman-kube.1>` Play containers, pods or volumes from a structured file
 
-:doc:`login <markdown/podman-login.1>` Login to a container registry
+:doc:`load <markdown/podman-load.1>` Load image(s) from a tar archive
 
-:doc:`logout <markdown/podman-logout.1>` Logout of a container registry
+:doc:`login <markdown/podman-login.1>` Log in to a container registry
 
-:doc:`logs <markdown/podman-logs.1>` Fetch the logs of a container
+:doc:`logout <markdown/podman-logout.1>` Log out of a container registry
 
-:doc:`machine <machine>` Manage podman's virtual machine
+:doc:`logs <markdown/podman-logs.1>` Fetch the logs of one or more containers
 
-:doc:`manifest <manifest>` Create and manipulate manifest lists and image indexes
+:doc:`machine <markdown/podman-machine.1>` Manage a virtual machine
+
+:doc:`manifest <markdown/podman-manifest.1>` Manipulate manifest lists and image indexes
 
 :doc:`mount <markdown/podman-mount.1>` Mount a working container's root filesystem
 
-:doc:`network <network>` Manage Networks
+:doc:`network <markdown/podman-network.1>` Manage networks
 
 :doc:`pause <markdown/podman-pause.1>` Pause all the processes in one or more containers
 
-:doc:`play <play>` Play a pod
-
-:doc:`pod <pod>` Manage pods
+:doc:`pod <markdown/podman-pod.1>` Manage pods
 
 :doc:`port <markdown/podman-port.1>` List port mappings or a specific mapping for the container
 
@@ -77,21 +81,23 @@ Commands
 
 :doc:`push <markdown/podman-push.1>` Push an image to a specified destination
 
+:doc:`quadlet <markdown/podman-quadlet.1>` Allows users to manage Quadlets
+
 :doc:`rename <markdown/podman-rename.1>` Rename an existing container
 
 :doc:`restart <markdown/podman-restart.1>` Restart one or more containers
 
 :doc:`rm <markdown/podman-rm.1>` Remove one or more containers
 
-:doc:`rmi <markdown/podman-rmi.1>` Removes one or more images from local storage
+:doc:`rmi <markdown/podman-rmi.1>` Remove one or more images from local storage
 
 :doc:`run <markdown/podman-run.1>` Run a command in a new container
 
-:doc:`save <markdown/podman-save.1>` Save image to an archive
+:doc:`save <markdown/podman-save.1>` Save image(s) to an archive
 
 :doc:`search <markdown/podman-search.1>` Search registry for image
 
-:doc:`secret <secret>` Manage podman secrets
+:doc:`secret <markdown/podman-secret.1>` Manage secrets
 
 :doc:`start <markdown/podman-start.1>` Start one or more containers
 
@@ -99,22 +105,24 @@ Commands
 
 :doc:`stop <markdown/podman-stop.1>` Stop one or more containers
 
-:doc:`system <system>` Manage podman
+:doc:`system <markdown/podman-system.1>` Manage podman
 
 :doc:`tag <markdown/podman-tag.1>` Add an additional name to a local image
 
 :doc:`top <markdown/podman-top.1>` Display the running processes of a container
 
-:doc:`unmount <markdown/podman-unmount.1>` Unmounts working container's root filesystem
+:doc:`unmount <markdown/podman-unmount.1>` Unmount working container's root filesystem
 
 :doc:`unpause <markdown/podman-unpause.1>` Unpause the processes in one or more containers
 
 :doc:`unshare <markdown/podman-unshare.1>` Run a command in a modified user namespace
 
-:doc:`untag <markdown/podman-untag.1>` Removes one or more names from a locally-stored image
+:doc:`untag <markdown/podman-untag.1>` Remove a name from a local image
 
-:doc:`version <markdown/podman-version.1>` Display the Podman Version Information
+:doc:`update <markdown/podman-update.1>` Update an existing container
 
-:doc:`volume <volume>` Manage volumes
+:doc:`version <markdown/podman-version.1>` Display the Podman version information
+
+:doc:`volume <markdown/podman-volume.1>` Manage volumes
 
 :doc:`wait <markdown/podman-wait.1>` Block on one or more containers

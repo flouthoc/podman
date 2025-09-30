@@ -2,23 +2,23 @@ package images
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"slices"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/parse"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/containers/podman/v3/pkg/util"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/parse"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh/terminal"
+	"go.podman.io/common/pkg/completion"
+	"golang.org/x/term"
 )
 
 var (
-	validFormats    = []string{define.OCIManifestDir, define.OCIArchive, define.V2s2ManifestDir, define.V2s2Archive}
 	containerConfig = registry.PodmanConfig()
 )
 
@@ -32,14 +32,14 @@ var (
 		RunE:  save,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return errors.Errorf("need at least 1 argument")
+				return errors.New("need at least 1 argument")
 			}
 			format, err := cmd.Flags().GetString("format")
 			if err != nil {
 				return err
 			}
-			if !util.StringInSlice(format, validFormats) {
-				return errors.Errorf("format value must be one of %s", strings.Join(validFormats, " "))
+			if !slices.Contains(common.ValidSaveFormats, format) {
+				return fmt.Errorf("format value must be one of %s", strings.Join(common.ValidSaveFormats, " "))
 			}
 			return nil
 		},
@@ -84,6 +84,8 @@ func saveFlags(cmd *cobra.Command) {
 
 	flags.BoolVar(&saveOpts.Compress, "compress", false, "Compress tarball image layers when saving to a directory using the 'dir' transport. (default is same compression type as source)")
 
+	flags.BoolVar(&saveOpts.OciAcceptUncompressedLayers, "uncompressed", false, "Accept uncompressed layers when copying OCI images")
+
 	formatFlagName := "format"
 	flags.StringVar(&saveOpts.Format, formatFlagName, define.V2s2Archive, "Save image to oci-archive, oci-dir (directory with oci manifest type), docker-archive, docker-dir (directory with v2s2 manifest type)")
 	_ = cmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteImageSaveFormat)
@@ -93,7 +95,12 @@ func saveFlags(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc(outputFlagName, completion.AutocompleteDefault)
 
 	flags.BoolVarP(&saveOpts.Quiet, "quiet", "q", false, "Suppress the output")
-	flags.BoolVarP(&saveOpts.MultiImageArchive, "multi-image-archive", "m", containerConfig.Engine.MultiImageArchive, "Interpret additional arguments as images not tags and create a multi-image-archive (only for docker-archive)")
+	flags.BoolVarP(&saveOpts.MultiImageArchive, "multi-image-archive", "m", containerConfig.ContainersConfDefaultsRO.Engine.MultiImageArchive, "Interpret additional arguments as images not tags and create a multi-image-archive (only for docker-archive)")
+
+	if !registry.IsRemote() {
+		flags.StringVar(&saveOpts.SignaturePolicy, "signature-policy", "", "Path to a signature-policy file")
+		_ = flags.MarkHidden("signature-policy")
+	}
 }
 
 func save(cmd *cobra.Command, args []string) (finalErr error) {
@@ -101,14 +108,14 @@ func save(cmd *cobra.Command, args []string) (finalErr error) {
 		tags      []string
 		succeeded = false
 	)
-	if cmd.Flag("compress").Changed && (saveOpts.Format != define.OCIManifestDir && saveOpts.Format != define.V2s2ManifestDir) {
-		return errors.Errorf("--compress can only be set when --format is either 'oci-dir' or 'docker-dir'")
+	if cmd.Flag("compress").Changed && saveOpts.Format != define.V2s2ManifestDir {
+		return errors.New("--compress can only be set when --format is 'docker-dir'")
 	}
 	if len(saveOpts.Output) == 0 {
 		saveOpts.Quiet = true
 		fi := os.Stdout
-		if terminal.IsTerminal(int(fi.Fd())) {
-			return errors.Errorf("refusing to save to terminal. Use -o flag or redirect")
+		if term.IsTerminal(int(fi.Fd())) {
+			return errors.New("refusing to save to terminal. Use -o flag or redirect")
 		}
 		pipePath, cleanup, err := setupPipe()
 		if err != nil {

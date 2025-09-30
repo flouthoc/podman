@@ -26,10 +26,14 @@ It can be handy to run the system service manually.  Doing so allows you to enab
 $ podman --log-level=debug system service -t0
 ```
 If you do not provide a specific path for the socket, a default is provided.  The location of that socket for
-rootful connections is `/run/podman/podman.sock` and for rootless it is `/run/USERID#/podman/podman.sock`. For more
+rootful connections is `/run/podman/podman.sock` and for rootless it is `/run/user/USERID#/podman/podman.sock`. For more
 information about the Podman system service, see `man podman-system-service`.
 
 ### Creating a connection
+Ensure the [required dependencies](https://podman.io/getting-started/installation#build-and-run-dependencies) are installed,
+as they will be required to compile a Go program making use of the bindings.
+
+
 The first step for using the bindings is to create a connection to the socket.  As mentioned earlier, the destination
 of the socket depends on the user who owns it. In this case, a rootful connection is made.
 
@@ -39,11 +43,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v3/pkg/bindings"
+	"github.com/containers/podman/v5/pkg/bindings"
 )
 
 func main() {
-	conn, err := bindings.NewConnection(context.Background(), "unix://run/podman/podman.sock")
+	conn, err := bindings.NewConnection(context.Background(), "unix:///run/podman/podman.sock")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -57,6 +61,10 @@ to interact with containers.
 ### Examples
 The following examples build upon the connection example from above.  They are all rootful connections as well.
 
+Note: Optional arguments to the bindings methods are set using With*() methods on *Option structures.
+Composite types are not duplicated rather the address is used. As such, you should not change an underlying
+field between initializing the *Option structure and calling the bindings method.
+
 #### Inspect a container
 The following example obtains the inspect information for a container named `foorbar` and then prints
 the container's ID. Note the use of optional inspect options for size.
@@ -66,12 +74,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/podman/v3/pkg/bindings/containers"
+	"github.com/containers/podman/v5/pkg/bindings"
+	"github.com/containers/podman/v5/pkg/bindings/containers"
 )
 
 func main() {
-	conn, err := bindings.NewConnection(context.Background(), "unix://run/podman/podman.sock")
+	conn, err := bindings.NewConnection(context.Background(), "unix:///run/podman/podman.sock")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -94,12 +102,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/podman/v3/pkg/bindings/images"
+	"github.com/containers/podman/v5/pkg/bindings"
+	"github.com/containers/podman/v5/pkg/bindings/images"
 )
 
 func main() {
-	conn, err := bindings.NewConnection(context.Background(), "unix://run/podman/podman.sock")
+	conn, err := bindings.NewConnection(context.Background(), "unix:///run/podman/podman.sock")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -122,14 +130,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v3/pkg/bindings"
-	"github.com/containers/podman/v3/pkg/bindings/containers"
-	"github.com/containers/podman/v3/pkg/bindings/images"
-	"github.com/containers/podman/v3/pkg/specgen"
+	"github.com/containers/podman/v5/pkg/bindings"
+	"github.com/containers/podman/v5/pkg/bindings/containers"
+	"github.com/containers/podman/v5/pkg/bindings/images"
+	"github.com/containers/podman/v5/pkg/specgen"
 )
 
 func main() {
-	conn, err := bindings.NewConnection(context.Background(), "unix://run/podman/podman.sock")
+	conn, err := bindings.NewConnection(context.Background(), "unix:///run/podman/podman.sock")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -231,3 +239,6 @@ $
 
 You can also verify that the information being passed back and forth is correct by putting
 with a tool like `socat`, which can dump what the socket is seeing.
+
+## Reducing Binary Size with "remote" Build Tag
+When building a program that uses the Podman Go bindings, you can reduce the binary size by passing the "remote" build tag to the go build command.  This tag excludes code related to local Podman operations, which is not needed for applications that only interact with Podman over a network.

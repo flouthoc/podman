@@ -1,4 +1,4 @@
-% podman-load(1)
+% podman-load 1
 
 ## NAME
 podman\-load - Load image(s) from a tar archive into container storage
@@ -17,20 +17,17 @@ The local client further supports loading an **oci-dir** or a **docker-dir** as 
 The **quiet** option suppresses the progress output when set.
 Note: `:` is a restricted character and cannot be part of the file name.
 
-
-**podman [GLOBAL OPTIONS]**
-
-**podman load [GLOBAL OPTIONS]**
-
-**podman load [OPTIONS]**
-
 ## OPTIONS
+
+#### **--help**, **-h**
+
+Print usage statement
 
 #### **--input**, **-i**=*input*
 
-Read from archive file, default is STDIN.
+Load the specified input file instead of from stdin.  The file can be on the local file system or on a server (e.g., https://server.com/archive.tar). Also supports loading in compressed files.
 
-The remote client requires the use of this option.
+The remote client, including Mac and Windows (excluding WSL2) machines, requires the use of this option.
 
 NOTE: Use the environment variable `TMPDIR` to change the temporary storage location of container images. Podman defaults to use `/var/tmp`.
 
@@ -38,20 +35,19 @@ NOTE: Use the environment variable `TMPDIR` to change the temporary storage loca
 
 Suppress the progress output
 
-#### **--help**, **-h**
-
-Print usage statement
-
 ## EXAMPLES
 
+Create an image from a compressed tar file, without showing progress.
 ```
-$ podman load --quiet -i fedora.tar
-```
-
-```
-$ podman load -q -i fedora.tar
+$ podman load --quiet -i fedora.tar.gz
 ```
 
+Create an image from the archive.tar file pulled from a URL, without showing progress.
+```
+$ podman load -q -i https://server.com/archive.tar
+```
+
+Create an image from stdin using bash redirection from a tar file.
 ```
 $ podman load < fedora.tar
 Getting image source signatures
@@ -64,6 +60,7 @@ Storing signatures
 Loaded image:  registry.fedoraproject.org/fedora:latest
 ```
 
+Create an image from stdin using a pipe.
 ```
 $ cat fedora.tar | podman load
 Getting image source signatures
@@ -77,7 +74,7 @@ Loaded image:  registry.fedoraproject.org/fedora:latest
 ```
 
 ## SEE ALSO
-podman(1), podman-save(1)
+**[podman(1)](podman.1.md)**, **[podman-save(1)](podman-save.1.md)**
 
 ## HISTORY
 July 2017, Originally compiled by Urvashi Mohnani <umohnani@redhat.com>

@@ -1,21 +1,12 @@
 package pods
 
 import (
-	"context"
-	"os"
-
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/inspect"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
-)
-
-var (
-	inspectOptions = entities.PodInspectOptions{}
 )
 
 var (
@@ -25,12 +16,14 @@ var (
 
 	inspectCmd = &cobra.Command{
 		Use:               "inspect [options] POD [POD...]",
-		Short:             "Displays a pod configuration",
+		Short:             "Display a pod configuration",
 		Long:              inspectDescription,
-		RunE:              inspect,
+		RunE:              inspectExec,
 		ValidArgsFunction: common.AutocompletePods,
 		Example:           `podman pod inspect podID`,
 	}
+
+	inspectOpts = &entities.InspectOptions{}
 )
 
 func init() {
@@ -41,44 +34,13 @@ func init() {
 	flags := inspectCmd.Flags()
 
 	formatFlagName := "format"
-	flags.StringVarP(&inspectOptions.Format, formatFlagName, "f", "json", "Format the output to a Go template or json")
-	_ = inspectCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(define.InspectPodData{}))
+	flags.StringVarP(&inspectOpts.Format, formatFlagName, "f", "json", "Format the output to a Go template or json")
+	_ = inspectCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.PodInspectReport{}))
 
-	validate.AddLatestFlag(inspectCmd, &inspectOptions.Latest)
+	validate.AddLatestFlag(inspectCmd, &inspectOpts.Latest)
 }
 
-func inspect(cmd *cobra.Command, args []string) error {
-	if len(args) < 1 && !inspectOptions.Latest {
-		return errors.Errorf("you must provide the name or id of a running pod")
-	}
-	if len(args) > 0 && inspectOptions.Latest {
-		return errors.Errorf("--latest and containers cannot be used together")
-	}
-
-	if !inspectOptions.Latest {
-		inspectOptions.NameOrID = args[0]
-	}
-	responses, err := registry.ContainerEngine().PodInspect(context.Background(), inspectOptions)
-	if err != nil {
-		return err
-	}
-
-	if report.IsJSON(inspectOptions.Format) {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "     ")
-		return enc.Encode(responses)
-	}
-
-	row := report.NormalizeFormat(inspectOptions.Format)
-
-	t, err := report.NewTemplate("inspect").Parse(row)
-	if err != nil {
-		return err
-	}
-
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
-	}
-	return t.Execute(w, *responses)
+func inspectExec(cmd *cobra.Command, args []string) error {
+	inspectOpts.Type = common.PodType
+	return inspect.Inspect(args, *inspectOpts)
 }

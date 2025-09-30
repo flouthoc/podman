@@ -17,7 +17,7 @@ package proc
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 )
 
@@ -32,7 +32,7 @@ type Stat struct {
 	// whether or not the executable is swapped out.
 	Comm string
 	// (3) The process state (e.g., running, sleeping, zombie, dead).
-	// Refer to proc(5) for further deatils.
+	// Refer to proc(5) for further details.
 	State string
 	// (4) The PID of the parent of this process.
 	Ppid string
@@ -114,7 +114,7 @@ type Stat struct {
 
 // readStat is used for mocking in unit tests.
 var readStat = func(path string) (string, error) {
-	rawData, err := ioutil.ReadFile(path)
+	rawData, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}

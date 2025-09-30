@@ -3,14 +3,13 @@ package utils_test
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"reflect"
 	"strings"
 
-	. "github.com/containers/podman/v3/test/utils"
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/ginkgo/extensions/table"
+	. "github.com/containers/podman/v5/test/utils"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -28,22 +27,9 @@ var _ = Describe("Common functions test", func() {
 		ProcessOneCgroupPath = defaultCgroupPath
 	})
 
-	It("Test CreateTempDirInTempDir", func() {
-		tmpDir, _ := CreateTempDirInTempDir()
-		_, err := os.Stat(tmpDir)
-		Expect(os.IsNotExist(err)).ShouldNot(BeTrue(), "Directory is not created as expect")
-	})
-
 	It("Test SystemExec", func() {
 		session := SystemExec(GoechoPath, []string{})
 		Expect(session.Command.Process).ShouldNot(BeNil(), "SystemExec cannot start a process")
-	})
-
-	It("Test StringInSlice", func() {
-		testSlice := []string{"apple", "peach", "pear"}
-		Expect(StringInSlice("apple", testSlice)).To(BeTrue(), "apple should in ['apple', 'peach', 'pear']")
-		Expect(StringInSlice("banana", testSlice)).ShouldNot(BeTrue(), "banana should not in ['apple', 'peach', 'pear']")
-		Expect(StringInSlice("anything", []string{})).ShouldNot(BeTrue(), "anything should not in empty slice")
 	})
 
 	DescribeTable("Test GetHostDistributionInfo",
@@ -51,7 +37,8 @@ var _ = Describe("Common functions test", func() {
 			txt := fmt.Sprintf("ID=%s\nVERSION_ID=%s", id, ver)
 			if !empty {
 				f, _ := os.Create(path)
-				f.WriteString(txt)
+				_, err := f.WriteString(txt)
+				Expect(err).ToNot(HaveOccurred(), "Failed to write data.")
 				f.Close()
 			}
 
@@ -69,18 +56,6 @@ var _ = Describe("Common functions test", func() {
 		Entry("Item empty with and without \"", "/tmp/os-release.test", "", "\"\"", false),
 	)
 
-	DescribeTable("Test IsKernelNewerThan",
-		func(kv string, expect, isNil bool) {
-			newer, err := IsKernelNewerThan(kv)
-			Expect(newer).To(Equal(expect), "Version compare results is not as expect.")
-			Expect(err == nil).To(Equal(isNil), "Error is not as expect.")
-		},
-		Entry("Invalid kernel version: 0", "0", false, false),
-		Entry("Older kernel version:0.0", "0.0", true, true),
-		Entry("Newer kernel version: 100.17.14", "100.17.14", false, true),
-		Entry("Invalid kernel version: I am not a kernel version", "I am not a kernel version", false, false),
-	)
-
 	DescribeTable("Test TestIsCommandAvailable",
 		func(cmd string, expect bool) {
 			cmdExist := IsCommandAvailable(cmd)
@@ -90,30 +65,32 @@ var _ = Describe("Common functions test", func() {
 		Entry("Command exist", "Fakecmd", false),
 	)
 
-	It("Test WriteJsonFile", func() {
-		type testJson struct {
+	It("Test WriteJSONFile", func() {
+		type testJSON struct {
 			Item1 int
 			Item2 []string
 		}
-		compareData := &testJson{}
+		compareData := &testJSON{}
 
-		testData := &testJson{
+		testData := &testJSON{
 			Item1: 5,
 			Item2: []string{"test"},
 		}
 
-		testByte, _ := json.Marshal(testData)
-		err := WriteJsonFile(testByte, "/tmp/testJson")
+		testByte, err := json.Marshal(testData)
+		Expect(err).ToNot(HaveOccurred(), "Failed to marshal data.")
 
-		Expect(err).To(BeNil(), "Failed to write JSON to file.")
+		err = WriteJSONFile(testByte, "/tmp/testJSON")
+		Expect(err).ToNot(HaveOccurred(), "Failed to write JSON to file.")
 
-		read, err := os.Open("/tmp/testJson")
+		read, err := os.Open("/tmp/testJSON")
+		Expect(err).ToNot(HaveOccurred(), "Can not find the JSON file after we write it.")
 		defer read.Close()
 
-		Expect(err).To(BeNil(), "Can not find the JSON file after we write it.")
-
-		bytes, _ := ioutil.ReadAll(read)
-		json.Unmarshal(bytes, compareData)
+		bytes, err := io.ReadAll(read)
+		Expect(err).ToNot(HaveOccurred())
+		err = json.Unmarshal(bytes, compareData)
+		Expect(err).ToNot(HaveOccurred())
 
 		Expect(reflect.DeepEqual(testData, compareData)).To(BeTrue(), "Data changed after we store it to file.")
 	})
@@ -135,7 +112,8 @@ var _ = Describe("Common functions test", func() {
 			}
 			if createFile {
 				f, _ := os.Create(path)
-				f.WriteString(txt)
+				_, err := f.WriteString(txt)
+				Expect(err).ToNot(HaveOccurred(), "Failed to write data.")
 				f.Close()
 			}
 			ProcessOneCgroupPath = path
@@ -146,5 +124,21 @@ var _ = Describe("Common functions test", func() {
 		Entry("Docker in cgroup file", "/tmp/cgroup.test", false, true, true),
 		Entry("Docker not in cgroup file", "/tmp/cgroup.test", false, true, false),
 	)
+
+	It("Test WriteRSAKeyPair", func() {
+		fileName := "/tmp/test_key"
+		bitSize := 1024
+
+		publicKeyFileName, privateKeyFileName, err := WriteRSAKeyPair(fileName, bitSize)
+		Expect(err).ToNot(HaveOccurred(), "Failed to write RSA key pair to files.")
+
+		read, err := os.Open(publicKeyFileName)
+		Expect(err).ToNot(HaveOccurred(), "Cannot find the public key file after we write it.")
+		defer read.Close()
+
+		read, err = os.Open(privateKeyFileName)
+		Expect(err).ToNot(HaveOccurred(), "Cannot find the private key file after we write it.")
+		defer read.Close()
+	})
 
 })

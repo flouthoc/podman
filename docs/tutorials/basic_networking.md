@@ -1,25 +1,26 @@
-![PODMAN logo](../../logo/podman-logo-source.svg)
+![PODMAN logo](https://raw.githubusercontent.com/containers/common/main/logos/podman-logo-full-vert.png)
 
 
 # Basic Networking Guide for Podman
 
 
-It seems once people master the basics of containers, networking is one of the first
-aspects they begin experimenting with.  And in regards to networking, it takes very
+It seems once people understand the basics of containers, networking is one of the first
+aspects they begin experimenting with.  And regarding networking, it takes very
 little experimentation before ending up on the deep end of the pool.  The following
-guide shows the most common network setups for Podman rootfull and rootless containers.
+guide shows the most common network setups for Podman rootful and rootless containers.
 Each setup is supported with an example.
 
 
-## Differences between rootfull and rootless container networking
+## Differences between rootful and rootless container networking
 
-One of the guiding factors on networking for containers with Podman is going to be
-whether or not the container is run by a root user or not.  This is because unprivileged
-users cannot create networking interfaces on the host.  Therefore, with rootfull
-containers, the default networking mode is to use the Container Network Interface
-(CNI) plugins and specifically the bridge plugin.  For rootless, the default network
-mode is slirp4netns. Because of the limited privileges, slirp4netns lacks some of
-the features of CNI networking; for example, slirp4netns cannot give containers a
+One of the guiding factors on networking for containers with Podman is going to
+be whether or not the container is run by a root user or not. This is because
+unprivileged users cannot create networking interfaces on the host. Therefore,
+for rootless containers, the default network mode is slirp4netns. Because of the
+limited privileges, slirp4netns lacks some of the features of networking
+compared to rootful Podman's networking; for example, slirp4netns cannot give
+containers a routable IP address. The default networking mode for rootful
+containers on the other side is netavark, which allows a container to have a
 routable IP address.
 
 ## Firewalls
@@ -31,14 +32,14 @@ port mapping.  Depending on the firewall implementation, we have observed firewa
 ports being opened automatically due to running a container with a port mapping (for
 example).  If container traffic does not seem to work properly, check the firewall
 and allow traffic on ports the container is using. A common problem is that
-reloading the firewall deletes the cni iptables rules resulting in a loss of
+reloading the firewall deletes the netavark iptables rules resulting in a loss of
 network connectivity for rootful containers. Podman v3 provides the podman
 network reload command to restore this without having to restart the container.
 
 ## Basic Network Setups
 
 Most containers and pods being run with Podman adhere to a couple of simple scenarios.
-By default, rootfull Podman will create a bridged network.  This is the most straightforward
+By default, rootful Podman will create a bridged network.  This is the most straightforward
 and preferred network setup for Podman. Bridge networking creates an interface for
 the container on an internal bridge network, which is then connected to the internet
 via Network Address Translation(NAT).  We also see users wanting to use `macvlan`
@@ -51,9 +52,9 @@ traffic.
 
 ### Bridge
 
-CNI defines a bridge network as where an internal network is created where both the
+A bridge network is defined as an internal network is created where both the
 container and host are attached.  Then this network is capable of allowing the containers
-to communicate outside of the host.
+to communicate outside the host.
 
 
 ![bridge_network](podman_bridge.png)
@@ -73,58 +74,61 @@ port be forwarded.
 
 Bridge networking is the default for Podman containers created as root. Podman provides
 a default bridge network, but you can create others using the `podman network create`
-command. Containers can be joined to a CNI network when they are created with the
+command. Containers can be joined to a network when they are created with the
 `--network` flag, or after they are created via the `podman network connect` and
 `podman network disconnect` commands.
 
 As mentioned earlier, slirp4netns is the default network configuration for rootless
-users.  But as of Podman version 3.0, rootless users can also use CNI networking.
-The user experience of rootless CNI is very akin to a rootfull CNI, except that
+users.  But as of Podman version 4.0, rootless users can also use netavark.
+The user experience of rootless netavark is very akin to a rootful netavark, except that
 there is no default network configuration provided.  You simply need to create a
-network, and the one will be created as a bridge network.
+network, and the one will be created as a bridge network. If you would like to switch from
+CNI networking to netavark, you must issue the `podman system reset --force` command.
+This will delete all of your images, containers, and custom networks.
 
 ```
 $ podman network create
 ```
 
-When rootless containers are run with a CNI networking configuration, CNI operations
+When rootless containers are run, network operations
 will be executed inside an extra network namespace. To join this namespace, use
-`podman unshare --rootless-cni`. Podman version 3.1 and earlier use a special “side-car”
-container called rootless-cni-infra. Do not remove this container while your rootless
-containers are running. If you remove this container (e.g. by accident), all attached
-containers lose network connectivity. In order to restore the network connectivity, all
-containers with networks must be restarted. This will automatically recreate the "side-car"
-container. When you are using version 3.2 or newer the “side-car” container can be
-safely removed. Therefore, it is no longer used.
-For rootfull containers, there is no extra namespace or “side-car” container
-as rootfull users have the permissions to create and modify network interfaces on
-the host.
+`podman unshare --rootless-netns`.
+
+#### Default Network
+
+The default network `podman` with netavark is memory-only.  It does not support dns resolution because of backwards compatibility with Docker.  To change settings, export the in-memory network and change the file.
+
+For the default rootful network use
+```
+podman network inspect podman | jq .[] > /etc/containers/networks/podman.json
+```
+
+And for the rootless network use
+
+```
+podman network inspect podman | jq .[] > ~/.local/share/containers/storage/networks/podman.json
+```
+
 
 #### Example
 
-By default, rootfull containers use the CNI bridge plugin for its default configuration.
+By default, rootful containers use the netavark for its default network if
+you have not migrated from Podman v3.
 In this case, no network name must be passed to Podman.  However, you can create
-additional bridged networks with the podman create command.  In that case, you will
-have to set the network name.
+additional bridged networks with the podman create command.
 
 The following example shows how to set up a web server and expose it to the network
-outside the host as both rootfull and rootless.  It will also show how an outside
+outside the host as both rootful and rootless.  It will also show how an outside
 client can connect to the container.
 
 ```
-(rootfull) $ sudo podman run -dt --name webserver -p 8080:80 quay.io/libpod/banner
+(rootful) $ sudo podman run -dt --name webserver -p 8080:80 quay.io/libpod/banner
 00f3440c7576aae2d5b193c40513c29c7964e96bf797cf0cc352c2b68ccbe66a
 ```
 
-As mentioned earlier, for rootless containers using CNI, a network must first be
-created.
-```
-$ podman network create
-/home/baude/.config/cni/net.d/cni-podman1.conflist
-```
 Now run the container.
 ```
-$ podman run -dt --name webserver --net cni-podman1 -p 8081:80 quay.io/libpod/banner
+$ podman run -dt --name webserver --network podman1 -p 8081:80 quay.io/libpod/banner
 269fd0d6b2c8ed60f2ca41d7beceec2471d72fb9a33aa8ca45b81dc9a0abbb12
 ```
 Note in the above run command, the container’s port 80 (where the Nginx server is
@@ -133,7 +137,7 @@ how the host and container ports can be mapped for external access.  The port co
 very well have been 80 as well (except for rootless users).
 
 To connect from an outside client to the webserver, simply point an HTTP client to
-the host’s IP address at port 8080 for rootfull and port 8081 for rootless.
+the host’s IP address at port 8080 for rootful and port 8081 for rootless.
 ```
 (outside_host): $ curl 192.168.99.109:8080
    ___           __
@@ -163,21 +167,53 @@ is leased from a DHCP server like most other network clients on the network.  If
 the laptop is running a firewall, such as firewalld, then accommodations will need
 to be made for proper access.
 
+Note that Podman has to be run as root in order to use macvlan.
+
 #### Example
 
 The following example demonstrates how to set up a web container on a macvlan and
 how to access that container from outside the host.  First, create the macvlan network.
  You need to know the network interface on the host that connects to the routable
 network.  In the example case, it is eth0.
+
 ```
 $ sudo podman network create -d macvlan -o parent=eth0 webnetwork
-/etc/cni/net.d/webnetwork.conflist
+webnetwork
 ```
-The next step is to ensure that the DHCP CNI plugin is running.  This plugin facilitates
-the DHCP lease from the network.
+
+The next step is to ensure that the DHCP service is running. This handles
+the DHCP leases from the network. If DHCP is not needed, the `--subnet` option
+can be used to assign a static subnet in the `network create` command above.
+
+CNI and netavark both use their own DHCP service; therefore, you need to know
+what backend you are using. To see what you are using, run this command:
+```
+$ sudo podman info --format {{.Host.NetworkBackend}}
+```
+If this command does not work, you are using an older version prior to Podman
+v4.0 which means you are using CNI.
+If the netavark backend is used, at least Podman v4.5 with netavark v1.6 is
+required to use DHCP.
+
+For netavark use:
+```
+$ sudo systemctl enable --now netavark-dhcp-proxy.socket
+```
+Or if the system doesn't use systemd, start the daemon manually:
+```
+$ /usr/libexec/podman/netavark dhcp-proxy --activity-timeout 0
+```
+
+With CNI use:
+```
+$ sudo systemctl enable --now cni-dhcp.socket
+```
+Or if the system doesn't use systemd, start the daemon manually:
 ```
 $ sudo /usr/libexec/cni/dhcp daemon
 ```
+Note that depending on the distribution, the binary location may differ.
+
 Now run the container and be certain to attach it to the network we created earlier.
 ```
 $ sudo podman run -dt --name webserver --network webnetwork quay.io/libpod/banner
@@ -291,5 +327,5 @@ same network namespace, the DB and Web container can communicate with each other
 using localhost (127.0.0.1).  Furthermore, they are also both addressable by the
 IP address (and DNS name if applicable) assigned to the Pod itself.
 
-For more information on container to container networking, see Configuring container
-networking with Podman.
+For more information on container to container networking, see [Configuring container
+networking with Podman](https://www.redhat.com/sysadmin/container-networking-podman).

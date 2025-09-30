@@ -1,22 +1,28 @@
-// +build linux netbsd freebsd darwin
+//go:build linux || netbsd || freebsd || darwin
 
 package copier
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"syscall"
 
-	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/unshare"
 	"golang.org/x/sys/unix"
 )
 
 const (
 	xattrsSupported = true
+	imaXattr        = "security.ima"
 )
 
 var (
-	relevantAttributes = []string{"security.capability", "security.ima", "user.*"} // the attributes that we preserve - we discard others
+	relevantAttributes    = []string{"security.capability", imaXattr, "user.*"} // the attributes that we preserve - we discard others
+	initialXattrListSize  = 64 * 1024
+	initialXattrValueSize = 64 * 1024
 )
 
 // isRelevantXattr checks if "attribute" matches one of the attribute patterns
@@ -35,49 +41,49 @@ func isRelevantXattr(attribute string) bool {
 // Lgetxattrs returns a map of the relevant extended attributes set on the given file.
 func Lgetxattrs(path string) (map[string]string, error) {
 	maxSize := 64 * 1024 * 1024
-	listSize := 64 * 1024
+	listSize := initialXattrListSize
 	var list []byte
 	for listSize < maxSize {
 		list = make([]byte, listSize)
 		size, err := unix.Llistxattr(path, list)
 		if err != nil {
-			if unwrapError(err) == syscall.ERANGE {
+			if errors.Is(err, syscall.ERANGE) {
 				listSize *= 2
 				continue
 			}
-			if (unwrapError(err) == syscall.ENOTSUP) || (unwrapError(err) == syscall.ENOSYS) {
+			if errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENOSYS) {
 				// treat these errors listing xattrs as equivalent to "no xattrs"
 				list = list[:0]
 				break
 			}
-			return nil, errors.Wrapf(err, "error listing extended attributes of %q", path)
+			return nil, fmt.Errorf("listing extended attributes of %q: %w", path, err)
 		}
 		list = list[:size]
 		break
 	}
 	if listSize >= maxSize {
-		return nil, errors.Errorf("unable to read list of attributes for %q: size would have been too big", path)
+		return nil, fmt.Errorf("unable to read list of attributes for %q: size would have been too big", path)
 	}
 	m := make(map[string]string)
 	for _, attribute := range strings.Split(string(list), string('\000')) {
 		if isRelevantXattr(attribute) {
-			attributeSize := 64 * 1024
+			attributeSize := initialXattrValueSize
 			var attributeValue []byte
 			for attributeSize < maxSize {
 				attributeValue = make([]byte, attributeSize)
 				size, err := unix.Lgetxattr(path, attribute, attributeValue)
 				if err != nil {
-					if unwrapError(err) == syscall.ERANGE {
+					if errors.Is(err, syscall.ERANGE) {
 						attributeSize *= 2
 						continue
 					}
-					return nil, errors.Wrapf(err, "error getting value of extended attribute %q on %q", attribute, path)
+					return nil, fmt.Errorf("getting value of extended attribute %q on %q: %w", attribute, path, err)
 				}
 				m[attribute] = string(attributeValue[:size])
 				break
 			}
 			if attributeSize >= maxSize {
-				return nil, errors.Errorf("unable to read attribute %q of %q: size would have been too big", attribute, path)
+				return nil, fmt.Errorf("unable to read attribute %q of %q: size would have been too big", attribute, path)
 			}
 		}
 	}
@@ -89,7 +95,11 @@ func Lsetxattrs(path string, xattrs map[string]string) error {
 	for attribute, value := range xattrs {
 		if isRelevantXattr(attribute) {
 			if err := unix.Lsetxattr(path, attribute, []byte(value), 0); err != nil {
-				return errors.Wrapf(err, "error setting value of extended attribute %q on %q", attribute, path)
+				if unshare.IsRootless() && attribute == imaXattr {
+					logrus.Warnf("Unable to set %q xattr on %q: %v", attribute, path, err)
+				} else {
+					return fmt.Errorf("setting value of extended attribute %q on %q: %w", attribute, path, err)
+				}
 			}
 		}
 	}

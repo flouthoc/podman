@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/containers/podman/v3/libpod/define"
-	"github.com/containers/podman/v3/pkg/bindings"
+	"github.com/containers/podman/v5/libpod/define"
+	"github.com/containers/podman/v5/pkg/bindings"
 )
 
 // RunHealthCheck executes the container's healthcheck and returns the health status of the
@@ -22,9 +22,11 @@ func RunHealthCheck(ctx context.Context, nameOrID string, options *HealthCheckOp
 	var (
 		status define.HealthCheckResults
 	)
-	response, err := conn.DoRequest(nil, http.MethodGet, "/containers/%s/healthcheck", nil, nil, nameOrID)
+	response, err := conn.DoRequest(ctx, nil, http.MethodGet, "/containers/%s/healthcheck", nil, nil, nameOrID)
 	if err != nil {
 		return nil, err
 	}
+	defer response.Body.Close()
+
 	return &status, response.Process(&status)
 }

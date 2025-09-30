@@ -10,7 +10,7 @@
 sudo pacman -S buildah
 ```
 
-#### [CentOS](https://www.centos.org)
+### [CentOS](https://www.centos.org)
 
 Buildah is available in the default Extras repos for CentOS 7 and in
 the AppStream repo for CentOS 8 and Stream, however the available version often
@@ -20,40 +20,14 @@ lags the upstream release.
 sudo yum -y install buildah
 ```
 
-The [Kubic project](https://build.opensuse.org/project/show/devel:kubic:libcontainers:stable)
-provides updated packages for CentOS 8 and CentOS 8 Stream.
-
-```bash
-# CentOS 8
-sudo dnf -y module disable container-tools
-sudo dnf -y install 'dnf-command(copr)'
-sudo dnf -y copr enable rhcontainerbot/container-selinux
-sudo curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/CentOS_8/devel:kubic:libcontainers:stable.repo
-# OPTIONAL FOR RUNC USERS: crun will be installed by default. Install runc first if you prefer runc
-sudo dnf -y --refresh install runc
-# Install Buildah
-sudo dnf -y --refresh install buildah
-
-# CentOS 8 Stream
-sudo dnf -y module disable container-tools
-sudo dnf -y install 'dnf-command(copr)'
-sudo dnf -y copr enable rhcontainerbot/container-selinux
-sudo curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/CentOS_8_Stream/devel:kubic:libcontainers:stable.repo
-# OPTIONAL FOR RUNC USERS: crun will be installed by default. Install runc first if you prefer runc
-sudo dnf -y --refresh install runc
-# Install Buildah
-sudo dnf -y --refresh install buildah
-```
-
-
-#### [Debian](https://debian.org)
+### [Debian](https://debian.org)
 
 The buildah package is available in
-the [Bullseye (testing) branch](https://packages.debian.org/bullseye/buildah), which
-will be the next stable release (Debian 11) as well as Debian Unstable/Sid.
+the [Bookworm](https://packages.debian.org/bookworm/buildah), which
+is the current stable release (Debian 12), as well as Debian Unstable/Sid.
 
 ```bash
-# Debian Testing/Bullseye or Unstable/Sid
+# Debian Stable/Bookworm or Unstable/Sid
 sudo apt-get update
 sudo apt-get -y install buildah
 ```
@@ -78,9 +52,9 @@ rpm-ostree install buildah
 Note: [`podman`](https://podman.io) build is available by default.
 
 ### [Gentoo](https://www.gentoo.org)
-
+[app-containers/buildah](https://packages.gentoo.org/packages/app-containers/buildah)
 ```bash
-sudo emerge app-emulation/libpod
+sudo emerge app-containers/buildah
 ```
 
 ### [openSUSE](https://www.opensuse.org)
@@ -127,39 +101,17 @@ sudo apt-get -y update
 sudo apt-get -y install buildah
 ```
 
-If you would prefer newer (though not as well-tested) packages,
-the [Kubic project](https://build.opensuse.org/package/show/devel:kubic:libcontainers:stable/buildah)
-provides packages for active Ubuntu releases 20.04 and newer (it should also work with direct derivatives like Pop!\_OS).
-The packages in Kubic project repos are more frequently updated than the one in Ubuntu's official repositories, due to how Debian/Ubuntu works.
-Checkout the Kubic project page for a list of supported Ubuntu version and architecture combinations.
-The build sources for the Kubic packages can be found [here](https://gitlab.com/rhcontainerbot/buildah/-/tree/debian/debian).
-
-CAUTION: On Ubuntu 20.10 and newer, we highly recommend you use Buildah, Podman and Skopeo ONLY from EITHER the Kubic repo
-OR the official Ubuntu repos. Mixing and matching may lead to unpredictable situations including installation conflicts.
-
-
-```bash
-. /etc/os-release
-sudo sh -c "echo 'deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/x${ID^}_${VERSION_ID}/ /' > /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list"
-wget -nv https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/x${ID^}_${VERSION_ID}/Release.key -O Release.key
-sudo apt-key add - < Release.key
-sudo apt-get update -qq
-sudo apt-get -qq -y install buildah
-```
-
 # Building from scratch
 
 ## System Requirements
 
 ### Kernel Version Requirements
 To run Buildah on Red Hat Enterprise Linux or CentOS, version 7.4 or higher is required.
-On other Linux distributions Buildah requires a kernel version of 4.0 or
-higher in order to support the OverlayFS filesystem.  The kernel version can be checked
-with the 'uname -a' command.
+On other Linux distributions Buildah requires a kernel version that supports the OverlayFS and/or fuse-overlayfs filesystem -- you'll need to consult your distribution's documentation to determine a minimum version number.
 
 ### runc Requirement
 
-Buildah uses `runc` to run commands when `buildah run` is used, or when `buildah build-using-dockerfile`
+Buildah uses `runc` to run commands when `buildah run` is used, or when `buildah build`
 encounters a `RUN` instruction, so you'll also need to build and install a compatible version of
 [runc](https://github.com/opencontainers/runc) for Buildah to call for those cases.  If Buildah is installed
 via a package manager such as yum, dnf or apt-get, runc will be installed as part of that process.
@@ -209,7 +161,6 @@ Prior to installing Buildah, install the following packages on your Linux distro
 * bats
 * btrfs-progs-devel
 * bzip2
-* device-mapper-devel
 * git
 * go-md2man
 * gpgme-devel
@@ -229,7 +180,6 @@ In Fedora, you can use this command:
     golang \
     bats \
     btrfs-progs-devel \
-    device-mapper-devel \
     glib2-devel \
     gpgme-devel \
     libassuan-devel \
@@ -244,11 +194,8 @@ In Fedora, you can use this command:
 Then to install Buildah on Fedora follow the steps in this example:
 
 ```
-  mkdir ~/buildah
-  cd ~/buildah
-  export GOPATH=`pwd`
-  git clone https://github.com/containers/buildah ./src/github.com/containers/buildah
-  cd ./src/github.com/containers/buildah
+  git clone https://github.com/containers/buildah
+  cd buildah
   make
   sudo make install
   buildah --help
@@ -256,9 +203,7 @@ Then to install Buildah on Fedora follow the steps in this example:
 
 ### RHEL, CentOS
 
-In RHEL and CentOS 7, ensure that you are subscribed to the `rhel-7-server-rpms`,
-`rhel-7-server-extras-rpms`, `rhel-7-server-optional-rpms` and `EPEL` repositories, then
-run this command:
+In RHEL and CentOS, run this command to install the build dependencies:
 
 ```
  yum -y install \
@@ -266,7 +211,6 @@ run this command:
     golang \
     bats \
     btrfs-progs-devel \
-    device-mapper-devel \
     glib2-devel \
     gpgme-devel \
     libassuan-devel \
@@ -280,11 +224,6 @@ run this command:
 
 The build steps for Buildah on RHEL or CentOS are the same as for Fedora, above.
 
-*NOTE:* Buildah on RHEL or CentOS version 7.* is not supported running as non-root due to
-these systems not having newuidmap or newgidmap installed.  It is possible to pull
-the shadow-utils source RPM from Fedora 29 and build and install from that in order to
-run Buildah as non-root on these systems.
-
 ### openSUSE
 
 On openSUSE Tumbleweed, install go via `zypper in go`, then run this command:
@@ -297,7 +236,6 @@ On openSUSE Tumbleweed, install go via `zypper in go`, then run this command:
     bzip2 \
     libgpgme-devel \
     libseccomp-devel \
-    device-mapper-devel \
     libbtrfs-devel \
     go-md2man
 ```
@@ -305,46 +243,16 @@ On openSUSE Tumbleweed, install go via `zypper in go`, then run this command:
 The build steps for Buildah on SUSE / openSUSE are the same as for Fedora, above.
 
 
-### Ubuntu
+### Ubuntu/Debian
 
-In Ubuntu zesty and xenial, you can use these commands:
+In Ubuntu 22.10 (Karmic) or Debian 12 (Bookworm) you can use these commands:
 
 ```
-  sudo apt-get -y install software-properties-common
-  sudo add-apt-repository -y ppa:alexlarsson/flatpak
-  sudo add-apt-repository -y ppa:gophers/archive
-  sudo apt-add-repository -y ppa:projectatomic/ppa
   sudo apt-get -y -qq update
-  sudo apt-get -y install bats btrfs-tools git libapparmor-dev libdevmapper-dev libglib2.0-dev libgpgme11-dev libseccomp-dev libselinux1-dev skopeo-containers go-md2man
-  sudo apt-get -y install golang-1.13
-```
-Then to install Buildah on Ubuntu follow the steps in this example:
-
-```
-  mkdir ~/buildah
-  cd ~/buildah
-  export GOPATH=`pwd`
-  git clone https://github.com/containers/buildah ./src/github.com/containers/buildah
-  cd ./src/github.com/containers/buildah
-  PATH=/usr/lib/go-1.13/bin:$PATH make runc all SECURITYTAGS="apparmor seccomp"
-  sudo make install install.runc
-  buildah --help
+  sudo apt-get -y install bats btrfs-progs git go-md2man golang libapparmor-dev libglib2.0-dev libgpgme11-dev libseccomp-dev libselinux1-dev make runc skopeo libbtrfs-dev
 ```
 
-### Debian
-
-To install the required dependencies, you can use those commands, tested under Debian GNU/Linux amd64 9.3 (stretch):
-
-```
-gpg --recv-keys 0x018BA5AD9DF57A4448F0E6CF8BECF1637AD8C79D
-sudo gpg --export 0x018BA5AD9DF57A4448F0E6CF8BECF1637AD8C79D >> /usr/share/keyrings/projectatomic-ppa.gpg
-sudo echo 'deb [signed-by=/usr/share/keyrings/projectatomic-ppa.gpg] http://ppa.launchpad.net/projectatomic/ppa/ubuntu zesty main' > /etc/apt/sources.list.d/projectatomic-ppa.list
-sudo apt update
-sudo apt -y install -t stretch-backports golang
-sudo apt -y install bats btrfs-tools git libapparmor-dev libdevmapper-dev libglib2.0-dev libgpgme11-dev libseccomp-dev libselinux1-dev skopeo-containers go-md2man
-```
-
-The build steps on Debian are otherwise the same as Ubuntu, above.
+The build steps for Buildah on Debian or Ubuntu are the same as for Fedora, above.
 
 ## Vendoring - Dependency Management
 
@@ -378,7 +286,7 @@ cat /etc/containers/registries.conf
 # and 'registries.block'.
 
 [registries.search]
-registries = ['docker.io', 'registry.fedoraproject.org', 'quay.io', 'registry.access.redhat.com', 'registry.centos.org']
+registries = ['docker.io', 'registry.fedoraproject.org', 'quay.io', 'registry.access.redhat.com']
 
 # If you need to access insecure registries, add the registry's fully-qualified name.
 # An insecure registry is one that does not have a valid SSL certificate or only does HTTP.
@@ -398,7 +306,7 @@ registries = []
 
 `/usr/share/containers/mounts.conf` and optionally `/etc/containers/mounts.conf`
 
-The mounts.conf files specify volume mount files or directories that are automatically mounted inside containers when executing the `buildah run` or `buildah build-using-dockerfile` commands.  Container processes can then use this content.  The volume mount content does not get committed to the final image.  This file is usually provided by the containers-common package.
+The mounts.conf files specify volume mount files or directories that are automatically mounted inside containers when executing the `buildah run` or `buildah build` commands.  Container processes can then use this content.  The volume mount content does not get committed to the final image.  This file is usually provided by the containers-common package.
 
 Usually these directories are used for passing secrets or credentials required by the package software to access remote package repositories.
 
@@ -451,9 +359,9 @@ cat /etc/containers/policy.json
 
 ## Debug with Delve and the like
 
-To make a source debug build without optimizations use `DEBUG=1`, like:
+To make a source debug build without optimizations use `BUILDDEBUG=1`, like:
 ```
-make all DEBUG=1
+make all BUILDDEBUG=1
 ```
 
 ## Vendoring

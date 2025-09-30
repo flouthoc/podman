@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
-	"github.com/opencontainers/runc/libcontainer/user"
+	"github.com/moby/sys/user"
 	"github.com/sirupsen/logrus"
 )
 
@@ -14,15 +14,15 @@ const (
 	etcgroup  = "/etc/group"
 )
 
-// Overrides allows you to override defaults in GetUserGroupInfo
+// Overrides allows you to override defaults in GetUserGroupInfo.
 type Overrides struct {
 	DefaultUser            *user.ExecUser
 	ContainerEtcPasswdPath string
 	ContainerEtcGroupPath  string
 }
 
-// GetUserGroupInfo takes string forms of the the container's mount path and the container user and
-// returns a ExecUser with uid, gid, sgids, and home.  And override can be provided for defaults.
+// GetUserGroupInfo takes string forms of the container's mount path and the container user and
+// returns an ExecUser with uid, gid, sgids, and home.  And override can be provided for defaults.
 func GetUserGroupInfo(containerMount, containerUser string, override *Overrides) (*user.ExecUser, error) {
 	var (
 		passwdDest, groupDest string
@@ -61,7 +61,7 @@ func GetUserGroupInfo(containerMount, containerUser string, override *Overrides)
 		defaultExecUser = override.DefaultUser
 	} else {
 		// Define a default container user
-		//defaultExecUser = &user.ExecUser{
+		// defaultExecUser = &user.ExecUser{
 		//	Uid:  0,
 		//	Gid:  0,
 		//	Home: "/",

@@ -2,6 +2,7 @@
 #
 # Usage: test-compose [testname]
 #
+set -Eu
 ME=$(basename $0)
 
 ###############################################################################
@@ -64,7 +65,7 @@ function is() {
     local expect=$2
     local testname=$3
 
-    if [[ $actual = $expect ]]; then
+    if [[ "$actual" = "$expect" ]]; then
         # On success, include expected value; this helps readers understand
         _show_ok 1 "$testname=$expect"
         return
@@ -173,14 +174,6 @@ function test_port() {
 
     if [ $curl_rc -ne 0 ]; then
         _show_ok 0 "$testname - curl (port $port) failed with status $curl_rc"
-        echo "# podman ps -a:"
-        $PODMAN_BIN --storage-driver=vfs --root $WORKDIR/root --runroot $WORKDIR/runroot ps -a
-        if type -p ss; then
-            echo "# ss -tulpn:"
-            ss -tulpn
-            echo "# podman unshare --rootless-cni ss -tulpn:"
-            $PODMAN_BIN --storage-driver=vfs --root $WORKDIR/root --runroot $WORKDIR/runroot unshare --rootless-cni ss -tulpn
-        fi
         echo "# cat $WORKDIR/server.log:"
         cat $WORKDIR/server.log
         echo "# cat $logfile:"
@@ -205,22 +198,22 @@ function start_service() {
 
     # FIXME: use ${testname} subdir but we can't: 50-char limit in runroot
     if ! is_rootless; then
-        rm -rf $WORKDIR/{root,runroot,cni}
+        rm -rf $WORKDIR/{root,runroot,networks,cdi}
     else
-        $PODMAN_BIN unshare rm -rf $WORKDIR/{root,runroot,cni}
+        $PODMAN_BIN unshare rm -rf $WORKDIR/{root,runroot,networks,cdi}
     fi
     rm -f $DOCKER_SOCK
-    mkdir --mode 0755 $WORKDIR/{root,runroot,cni}
+    mkdir --mode 0755 $WORKDIR/{root,runroot,networks,cdi}
     chcon --reference=/var/lib/containers $WORKDIR/root
-    cp /etc/cni/net.d/*podman*conflist $WORKDIR/cni/
 
     $PODMAN_BIN \
         --log-level debug \
-	--storage-driver=vfs \
+        --storage-driver=vfs \
         --root $WORKDIR/root \
         --runroot $WORKDIR/runroot \
         --cgroup-manager=systemd \
-        --cni-config-dir $WORKDIR/cni \
+        --network-config-dir $WORKDIR/networks \
+        --cdi-spec-dir $WORKDIR/cdi \
         system service \
         --time 0 unix://$DOCKER_SOCK \
         &> $WORKDIR/server.log &
@@ -244,11 +237,25 @@ function start_service() {
 function podman() {
     echo "\$ podman $*"           >>$WORKDIR/output.log
     output=$($PODMAN_BIN \
-	--storage-driver=vfs \
+        --storage-driver=vfs \
         --root    $WORKDIR/root    \
         --runroot $WORKDIR/runroot \
+        --network-config-dir $WORKDIR/networks \
+        --cdi-spec-dir $WORKDIR/cdi \
         "$@")
+    rc=$?
+
     echo -n "$output" >>$WORKDIR/output.log
+    return $rc
+}
+
+# as rootless we want to test the remote connection so we add --connection
+function podman_compose() {
+    if is_rootless; then
+        $PODMAN_BIN --connection compose-sock compose "$@"
+    else
+        podman compose "$@"
+    fi
 }
 
 ###################
@@ -275,11 +282,22 @@ done
 
 # When rootless use a socket path accessible by the rootless user
 if is_rootless; then
+    # lets test two cases here, for rootless we try to connect to the connection as this should be respected
     DOCKER_SOCK="$WORKDIR/docker.sock"
-    DOCKER_HOST="unix://$DOCKER_SOCK"
+    # use PODMAN_CONNECTIONS_CONF so we do not overwrite user settings
+    PODMAN_CONNECTIONS_CONF="$WORKDIR/connections.json"
+    export PODMAN_CONNECTIONS_CONF
+    $PODMAN_BIN system connection add --default notexists "unix:///I/do/not/exist"
+    $PODMAN_BIN system connection add compose-sock "unix://$DOCKER_SOCK"
+
+else
     # export DOCKER_HOST docker-compose will use it
+    DOCKER_HOST="unix://$DOCKER_SOCK"
     export DOCKER_HOST
 fi
+
+# hide annoying podman compose warnings, some tests want to check compose stderr and this breaks it.
+export PODMAN_COMPOSE_WARNING_LOGS=false
 
 # Identify the tests to run. If called with args, use those as globs.
 tests_to_run=()
@@ -303,12 +321,12 @@ n_tests=0
 # We aren't really TAP 13; this helps logformatter recognize our output as BATS
 echo "TAP version 13"
 
-for t in ${tests_to_run[@]}; do
+for t in "${tests_to_run[@]}"; do
     testdir="$(dirname $t)"
     testname="$(basename $testdir)"
 
-    if [ -e $test_dir/SKIP ]; then
-        local reason="$(<$test_dir/SKIP)"
+    if [ -e $testdir/SKIP ]; then
+        reason="$(<$testdir/SKIP)"
         if [ -n "$reason" ]; then
             reason=" - $reason"
         fi
@@ -322,21 +340,29 @@ for t in ${tests_to_run[@]}; do
     (
         cd $testdir || die "Cannot cd $testdir"
 
+        if [ -e teardown.sh ]; then
+            trap 'teardown' EXIT
+            function teardown() {
+                trap '_show_ok 0 "$testname - teardown" "[ok]" "[error]"' ERR
+                . teardown.sh
+                trap - ERR
+            }
+        fi
+
         # setup file may be used for creating temporary directories/files.
         # We source it so that envariables defined in it will get back to us.
         if [ -e setup.sh ]; then
+            trap '_show_ok 0 "$testname - setup" "[ok]" "[error]"' ERR
             . setup.sh
-        fi
-        if [ -e teardown.sh ]; then
-            trap '. teardown.sh' 0
+            trap - ERR
         fi
 
-        docker-compose up -d     &> $logfile
+        podman_compose up -d     &> $logfile
         docker_compose_rc=$?
         if [[ $docker_compose_rc -ne 0 ]]; then
             _show_ok 0 "$testname - up" "[ok]" "status=$docker_compose_rc"
             sed -e 's/^/#  /' <$logfile
-            docker-compose down >>$logfile 2>&1      # No status check here
+            podman_compose down >>$logfile 2>&1      # No status check here
             exit 1
         fi
         _show_ok 1 "$testname - up"
@@ -344,17 +370,19 @@ for t in ${tests_to_run[@]}; do
         # Run tests. This is likely to be a series of 'test_port' checks
         # but may also include podman commands to inspect labels, state
         if [ -e tests.sh ]; then
+            trap '_show_ok 0 "$testname - tests" "[ok]" "[error]"' ERR
             . tests.sh
+            trap - ERR
         fi
         # FIXME: if any tests fail, try 'podman logs' on container?
 
-        if [ -n "$COMPOSE_WAIT" ]; then
+        if [ -n "${COMPOSE_WAIT:-}" ]; then
             echo -n "Pausing due to \$COMPOSE_WAIT. Press ENTER to continue: "
             read keepgoing
         fi
 
         # Done. Clean up.
-        docker-compose down     &>> $logfile
+        podman_compose down     &>> $logfile
         rc=$?
         if [[ $rc -eq 0 ]]; then
             _show_ok 1 "$testname - down"
@@ -375,7 +403,7 @@ for t in ${tests_to_run[@]}; do
     fi
 
     # FIXME: run 'podman ps'?
-#    rm -rf $WORKDIR/${testname}
+    #    rm -rf $WORKDIR/${testname}
 done
 
 # END   entry handler
@@ -386,8 +414,8 @@ done
 test_count=$(<$testcounter_file)
 failure_count=$(<$failures_file)
 
-if [ -z "$PODMAN_TESTS_KEEP_WORKDIR" ]; then
-     if ! is_rootless; then
+if [ -z "${PODMAN_TESTS_KEEP_WORKDIR:-}" ]; then
+    if ! is_rootless; then
         rm -rf $WORKDIR
     else
         $PODMAN_BIN unshare rm -rf $WORKDIR

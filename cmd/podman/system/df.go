@@ -1,18 +1,21 @@
 package system
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/cmd/podman/validate"
-	"github.com/containers/podman/v3/pkg/domain/entities"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/cmd/podman/validate"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -45,7 +48,7 @@ func init() {
 
 	formatFlagName := "format"
 	flags.StringVar(&dfOptions.Format, formatFlagName, "", "Pretty-print images using a Go template")
-	_ = dfSystemCommand.RegisterFlagCompletionFunc(formatFlagName, completion.AutocompleteNone)
+	_ = dfSystemCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&dfSummary{}))
 }
 
 func df(cmd *cobra.Command, args []string) error {
@@ -54,38 +57,41 @@ func df(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	w, err := report.NewWriterDefault(os.Stdout)
-	if err != nil {
-		return err
+	if dfOptions.Format != "" && dfOptions.Verbose {
+		return errors.New("cannot combine --format and --verbose flags")
 	}
 
 	if dfOptions.Verbose {
-		return printVerbose(w, cmd, reports)
+		return printVerbose(cmd, reports)
 	}
-	return printSummary(w, cmd, reports)
+	return printSummary(cmd, reports)
 }
 
-func printSummary(w *report.Writer, cmd *cobra.Command, reports *entities.SystemDfReport) error {
+func printSummary(cmd *cobra.Command, reports *entities.SystemDfReport) error {
 	var (
-		dfSummaries       []*dfSummary
-		active            int
-		size, reclaimable int64
+		dfSummaries []*dfSummary
+		active      int
+		used        int64
 	)
+
+	visitedImages := make(map[string]bool)
 	for _, i := range reports.Images {
+		if _, ok := visitedImages[i.ImageID]; ok {
+			continue
+		}
+		visitedImages[i.ImageID] = true
 		if i.Containers > 0 {
 			active++
-		}
-		size += i.Size
-		if i.Containers < 1 {
-			reclaimable += i.Size
+			used += i.UniqueSize
 		}
 	}
+
 	imageSummary := dfSummary{
-		Type:        "Images",
-		Total:       len(reports.Images),
-		Active:      active,
-		size:        size,
-		reclaimable: reclaimable,
+		Type:           "Images",
+		Total:          len(reports.Images),
+		Active:         active,
+		RawSize:        reports.ImagesSize,        // The "raw" size is the sum of all layer sizes
+		RawReclaimable: reports.ImagesSize - used, // We can reclaim the date of "unused" images (i.e., the ones without containers)
 	}
 	dfSummaries = append(dfSummaries, &imageSummary)
 
@@ -103,11 +109,11 @@ func printSummary(w *report.Writer, cmd *cobra.Command, reports *entities.System
 		conSize += c.RWSize
 	}
 	containerSummary := dfSummary{
-		Type:        "Containers",
-		Total:       len(reports.Containers),
-		Active:      conActive,
-		size:        conSize,
-		reclaimable: conReclaimable,
+		Type:           "Containers",
+		Total:          len(reports.Containers),
+		Active:         conActive,
+		RawSize:        conSize,
+		RawReclaimable: conReclaimable,
 	}
 	dfSummaries = append(dfSummaries, &containerSummary)
 
@@ -123,11 +129,11 @@ func printSummary(w *report.Writer, cmd *cobra.Command, reports *entities.System
 		volumesReclaimable += v.ReclaimableSize
 	}
 	volumeSummary := dfSummary{
-		Type:        "Local Volumes",
-		Total:       len(reports.Volumes),
-		Active:      activeVolumes,
-		size:        volumesSize,
-		reclaimable: volumesReclaimable,
+		Type:           "Local Volumes",
+		Total:          len(reports.Volumes),
+		Active:         activeVolumes,
+		RawSize:        volumesSize,
+		RawReclaimable: volumesReclaimable,
 	}
 	dfSummaries = append(dfSummaries, &volumeSummary)
 
@@ -136,17 +142,41 @@ func printSummary(w *report.Writer, cmd *cobra.Command, reports *entities.System
 		"Size":        "SIZE",
 		"Reclaimable": "RECLAIMABLE",
 	})
-	row := "{{.Type}}\t{{.Total}}\t{{.Active}}\t{{.Size}}\t{{.Reclaimable}}\n"
+
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+
+	var err error
 	if cmd.Flags().Changed("format") {
-		row = report.NormalizeFormat(dfOptions.Format)
+		if report.IsJSON(dfOptions.Format) {
+			return printJSON(dfSummaries)
+		}
+		rpt, err = rpt.Parse(report.OriginUser, dfOptions.Format)
+	} else {
+		row := "{{range . }}{{.Type}}\t{{.Total}}\t{{.Active}}\t{{.Size}}\t{{.Reclaimable}}\n{{end -}}"
+		rpt, err = rpt.Parse(report.OriginPodman, row)
 	}
-	return writeTemplate(w, cmd, hdrs, row, dfSummaries)
+	if err != nil {
+		return err
+	}
+	return writeTemplate(rpt, hdrs, dfSummaries)
 }
 
-func printVerbose(w *report.Writer, cmd *cobra.Command, reports *entities.SystemDfReport) error {
-	defer w.Flush()
+func printJSON(data []*dfSummary) error {
+	bytes, err := json.MarshalIndent(data, "", "    ")
+	if err != nil {
+		return err
+	}
 
-	fmt.Fprint(w, "Images space usage:\n\n")
+	fmt.Println(string(bytes))
+	return nil
+}
+
+func printVerbose(cmd *cobra.Command, reports *entities.SystemDfReport) error { //nolint:interfacer
+	rpt := report.New(os.Stdout, cmd.Name())
+	defer rpt.Flush()
+
+	fmt.Fprint(rpt.Writer(), "Images space usage:\n\n")
 	// convert to dfImage for output
 	dfImages := make([]*dfImage, 0, len(reports.Images))
 	for _, d := range reports.Images {
@@ -157,12 +187,16 @@ func printVerbose(w *report.Writer, cmd *cobra.Command, reports *entities.System
 		"SharedSize": "SHARED SIZE",
 		"UniqueSize": "UNIQUE SIZE",
 	})
-	imageRow := "{{.Repository}}\t{{.Tag}}\t{{.ImageID}}\t{{.Created}}\t{{.Size}}\t{{.SharedSize}}\t{{.UniqueSize}}\t{{.Containers}}\n"
-	if err := writeTemplate(w, cmd, hdrs, imageRow, dfImages); err != nil {
-		return nil
+	imageRow := "{{range .}}{{.Repository}}\t{{.Tag}}\t{{.ImageID}}\t{{.Created}}\t{{.Size}}\t{{.SharedSize}}\t{{.UniqueSize}}\t{{.Containers}}\n{{end -}}"
+	rpt, err := rpt.Parse(report.OriginPodman, imageRow)
+	if err != nil {
+		return err
+	}
+	if err := writeTemplate(rpt, hdrs, dfImages); err != nil {
+		return err
 	}
 
-	fmt.Fprint(w, "\nContainers space usage:\n\n")
+	fmt.Fprint(rpt.Writer(), "\nContainers space usage:\n\n")
 	// convert to dfContainers for output
 	dfContainers := make([]*dfContainer, 0, len(reports.Containers))
 	for _, d := range reports.Containers {
@@ -173,12 +207,16 @@ func printVerbose(w *report.Writer, cmd *cobra.Command, reports *entities.System
 		"LocalVolumes": "LOCAL VOLUMES",
 		"RWSize":       "SIZE",
 	})
-	containerRow := "{{.ContainerID}}\t{{.Image}}\t{{.Command}}\t{{.LocalVolumes}}\t{{.RWSize}}\t{{.Created}}\t{{.Status}}\t{{.Names}}\n"
-	if err := writeTemplate(w, cmd, hdrs, containerRow, dfContainers); err != nil {
-		return nil
+	containerRow := "{{range .}}{{.ContainerID}}\t{{.Image}}\t{{.Command}}\t{{.LocalVolumes}}\t{{.RWSize}}\t{{.Created}}\t{{.Status}}\t{{.Names}}\n{{end -}}"
+	rpt, err = rpt.Parse(report.OriginPodman, containerRow)
+	if err != nil {
+		return err
+	}
+	if err := writeTemplate(rpt, hdrs, dfContainers); err != nil {
+		return err
 	}
 
-	fmt.Fprint(w, "\nLocal Volumes space usage:\n\n")
+	fmt.Fprint(rpt.Writer(), "\nLocal Volumes space usage:\n\n")
 	dfVolumes := make([]*dfVolume, 0, len(reports.Volumes))
 	// convert to dfVolume for output
 	for _, d := range reports.Volumes {
@@ -187,25 +225,21 @@ func printVerbose(w *report.Writer, cmd *cobra.Command, reports *entities.System
 	hdrs = report.Headers(entities.SystemDfVolumeReport{}, map[string]string{
 		"VolumeName": "VOLUME NAME",
 	})
-	volumeRow := "{{.VolumeName}}\t{{.Links}}\t{{.Size}}\n"
-	return writeTemplate(w, cmd, hdrs, volumeRow, dfVolumes)
-}
-
-func writeTemplate(w *report.Writer, cmd *cobra.Command, hdrs []map[string]string, format string, output interface{}) error {
-	defer w.Flush()
-
-	format = report.EnforceRange(format)
-	tmpl, err := report.NewTemplate("df").Parse(format)
+	volumeRow := "{{range .}}{{.VolumeName}}\t{{.Links}}\t{{.Size}}\n{{end -}}"
+	rpt, err = rpt.Parse(report.OriginPodman, volumeRow)
 	if err != nil {
 		return err
 	}
+	return writeTemplate(rpt, hdrs, dfVolumes)
+}
 
-	if !cmd.Flags().Changed("format") {
-		if err := tmpl.Execute(w, hdrs); err != nil {
+func writeTemplate(rpt *report.Formatter, hdrs []map[string]string, output any) error {
+	if rpt.RenderHeaders {
+		if err := rpt.Execute(hdrs); err != nil {
 			return err
 		}
 	}
-	return tmpl.Execute(w, output)
+	return rpt.Execute(output)
 }
 
 type dfImage struct {
@@ -241,7 +275,10 @@ func (d *dfContainer) ContainerID() string {
 }
 
 func (d *dfContainer) Image() string {
-	return d.SystemDfContainerReport.Image[0:12]
+	if len(d.SystemDfContainerReport.Image) >= 12 {
+		return d.SystemDfContainerReport.Image[0:12]
+	}
+	return ""
 }
 
 func (d *dfContainer) Command() string {
@@ -265,18 +302,35 @@ func (d *dfVolume) Size() string {
 }
 
 type dfSummary struct {
-	Type        string
-	Total       int
-	Active      int
-	size        int64
-	reclaimable int64
+	Type           string
+	Total          int
+	Active         int
+	RawSize        int64
+	RawReclaimable int64
 }
 
 func (d *dfSummary) Size() string {
-	return units.HumanSize(float64(d.size))
+	return units.HumanSize(float64(d.RawSize))
 }
 
 func (d *dfSummary) Reclaimable() string {
-	percent := int(float64(d.reclaimable)/float64(d.size)) * 100
-	return fmt.Sprintf("%s (%d%%)", units.HumanSize(float64(d.reclaimable)), percent)
+	percent := 0
+	// make sure to check this to prevent div by zero problems
+	if d.RawSize > 0 {
+		percent = int(math.Round(float64(d.RawReclaimable) / float64(d.RawSize) * float64(100)))
+	}
+	return fmt.Sprintf("%s (%d%%)", units.HumanSize(float64(d.RawReclaimable)), percent)
+}
+
+func (d *dfSummary) MarshalJSON() ([]byte, error) {
+	// need to create a new type here to prevent infinite recursion in MarshalJSON() call
+	type rawDf dfSummary
+
+	return json.Marshal(struct {
+		rawDf
+		// fields for docker compat https://github.com/containers/podman/issues/16902
+		TotalCount  int
+		Size        string
+		Reclaimable string
+	}{rawDf(*d), d.Total, d.Size(), d.Reclaimable()})
 }

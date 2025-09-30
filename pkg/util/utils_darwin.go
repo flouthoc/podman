@@ -1,9 +1,9 @@
-//+build darwin
+//go:build darwin
 
 package util
 
 import (
-	"github.com/pkg/errors"
+	"errors"
 )
 
 func GetContainerPidInformationDescriptors() ([]string, error) {

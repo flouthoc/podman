@@ -1,6 +1,1 @@
-docker~=4.4.3
-
-requests~=2.20.0
-setuptools~=50.3.2
-python-dateutil~=2.8.1
-PyYAML~=5.4.1
+../apiv2/python/requirements.txt

@@ -1,9 +1,13 @@
+//go:build !remote
+
 package types
 
-const (
-	// DefaultAPIVersion is the version of the API the server defaults to.
-	DefaultAPIVersion = "1.40" // See https://docs.docker.com/engine/api/v1.40/
+type APIContextKey int
 
-	// DefaultAPIVersion is the minimal required version of the API.
-	MinimalAPIVersion = "1.24"
+const (
+	DecoderKey APIContextKey = iota
+	RuntimeKey
+	IdleTrackerKey
+	ConnKey
+	CompatDecoderKey
 )

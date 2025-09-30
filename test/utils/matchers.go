@@ -1,61 +1,173 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/onsi/gomega/format"
 	"github.com/onsi/gomega/gexec"
+	"github.com/onsi/gomega/types"
 )
 
-// ExitWithError matches when assertion is > argument.  Default 0
-// Modeled after the gomega Exit() matcher
-func ExitWithError(optionalExitCode ...int) *exitMatcher {
-	exitCode := 0
-	if len(optionalExitCode) > 0 {
-		exitCode = optionalExitCode[0]
-	}
-	return &exitMatcher{exitCode: exitCode}
+type podmanSession interface {
+	ExitCode() int
+	ErrorToString() string
 }
 
-type exitMatcher struct {
-	exitCode       int
-	actualExitCode int
+type ExitMatcher struct {
+	types.GomegaMatcher
+	ExpectedExitCode    int
+	ExitCode            int
+	ExpectedStderr      string
+	ExpectedStderrRegex string
+	msg                 string
 }
 
-func (m *exitMatcher) Match(actual interface{}) (success bool, err error) {
-	exiter, ok := actual.(gexec.Exiter)
+// ExitWithError checks both exit code and stderr, fails if either does not match
+// Modeled after the gomega Exit() matcher and also operates on sessions.
+func ExitWithError(expectExitCode int, expectStderr string) *ExitMatcher {
+	return &ExitMatcher{ExpectedExitCode: expectExitCode, ExpectedStderr: expectStderr}
+}
+
+// ExitWithErrorRegex checks both exit code and the stderr regex, fails if either does not match
+// Modeled after the gomega Exit() matcher and also operates on sessions.
+func ExitWithErrorRegex(expectExitCode int, expectStderrRegex string) *ExitMatcher {
+	return &ExitMatcher{ExpectedExitCode: expectExitCode, ExpectedStderrRegex: expectStderrRegex}
+}
+
+// Match follows gexec.Matcher interface.
+func (matcher *ExitMatcher) Match(actual any) (success bool, err error) {
+	session, ok := actual.(podmanSession)
 	if !ok {
 		return false, fmt.Errorf("ExitWithError must be passed a gexec.Exiter (Missing method ExitCode() int) Got:\n#{format.Object(actual, 1)}")
 	}
 
-	m.actualExitCode = exiter.ExitCode()
-	if m.actualExitCode == -1 {
+	matcher.ExitCode = session.ExitCode()
+	if matcher.ExitCode == -1 {
+		matcher.msg = "Expected process to exit. It did not."
 		return false, nil
 	}
-	return m.actualExitCode > m.exitCode, nil
-}
 
-func (m *exitMatcher) FailureMessage(actual interface{}) (message string) {
-	if m.actualExitCode == -1 {
-		return "Expected process to exit.  It did not."
+	// Check exit code first. If it's not what we want, there's no point
+	// in checking error substrings
+	if matcher.ExitCode != matcher.ExpectedExitCode {
+		matcher.msg = fmt.Sprintf("Command exited with status %d (expected %d)", matcher.ExitCode, matcher.ExpectedExitCode)
+		return false, nil
 	}
-	return format.Message(m.actualExitCode, "to be greater than exit code:", m.exitCode)
-}
 
-func (m *exitMatcher) NegatedFailureMessage(actual interface{}) (message string) {
-	if m.actualExitCode == -1 {
-		return "you really shouldn't be able to see this!"
-	} else {
-		if m.exitCode == -1 {
-			return "Expected process not to exit.  It did."
+	switch {
+	case matcher.ExpectedStderrRegex != "":
+		matched, err := regexp.MatchString(matcher.ExpectedStderrRegex, session.ErrorToString())
+		if err != nil {
+			matcher.msg = fmt.Sprintf("Invalid regex pattern: %s", err)
+			return false, err
 		}
-		return format.Message(m.actualExitCode, "is less than or equal to exit code:", m.exitCode)
+		if !matched {
+			matcher.msg = fmt.Sprintf("Command exited %d as expected, but stderr did not match regex '%s'", matcher.ExitCode, matcher.ExpectedStderrRegex)
+			return false, nil
+		}
+	case matcher.ExpectedStderr != "":
+		if !strings.Contains(session.ErrorToString(), matcher.ExpectedStderr) {
+			matcher.msg = fmt.Sprintf("Command exited %d as expected, but did not emit '%s'", matcher.ExitCode, matcher.ExpectedStderr)
+			return false, nil
+		}
+	default:
+		if session.ErrorToString() != "" {
+			matcher.msg = "Command exited with expected exit status, but emitted unwanted stderr"
+			return false, nil
+		}
 	}
+
+	return true, nil
 }
-func (m *exitMatcher) MatchMayChangeInTheFuture(actual interface{}) bool {
+
+func (matcher *ExitMatcher) FailureMessage(_ any) (message string) {
+	return matcher.msg
+}
+
+func (matcher *ExitMatcher) NegatedFailureMessage(_ any) (message string) {
+	panic("There is no conceivable reason to call Not(ExitWithError) !")
+}
+
+func (matcher *ExitMatcher) MatchMayChangeInTheFuture(actual any) bool {
 	session, ok := actual.(*gexec.Session)
 	if ok {
 		return session.ExitCode() == -1
 	}
 	return true
+}
+
+// ExitCleanly asserts that a PodmanSession exits 0 and with no stderr
+// Consider using PodmanTestIntegration.PodmanExitCleanly instead of directly using this matcher.
+func ExitCleanly() types.GomegaMatcher {
+	return &exitCleanlyMatcher{}
+}
+
+type exitCleanlyMatcher struct {
+	msg string
+}
+
+func (matcher *exitCleanlyMatcher) Match(actual any) (success bool, err error) {
+	session, ok := actual.(podmanSession)
+	if !ok {
+		return false, fmt.Errorf("ExitCleanly must be passed a PodmanSession; Got:\n %+v\n%q", actual, format.Object(actual, 1))
+	}
+
+	exitcode := session.ExitCode()
+	stderr := session.ErrorToString()
+	if exitcode != 0 {
+		matcher.msg = fmt.Sprintf("Command failed with exit status %d", exitcode)
+		if stderr != "" {
+			matcher.msg += ". See above for error message."
+		}
+		return false, nil
+	}
+
+	// Exit status is 0. Now check for anything on stderr
+	if stderr != "" {
+		matcher.msg = fmt.Sprintf("Unexpected warnings seen on stderr: %q", stderr)
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (matcher *exitCleanlyMatcher) FailureMessage(_ any) (message string) {
+	return matcher.msg
+}
+
+func (matcher *exitCleanlyMatcher) NegatedFailureMessage(_ any) (message string) {
+	// FIXME - I see no situation in which we could ever want this?
+	return matcher.msg + " (NOT!)"
+}
+
+type ValidJSONMatcher struct {
+	types.GomegaMatcher
+}
+
+func BeValidJSON() *ValidJSONMatcher {
+	return &ValidJSONMatcher{}
+}
+
+func (matcher *ValidJSONMatcher) Match(actual any) (success bool, err error) {
+	s, ok := actual.(string)
+	if !ok {
+		return false, fmt.Errorf("ValidJSONMatcher expects a string, not %q", actual)
+	}
+
+	var i any
+	if err := json.Unmarshal([]byte(s), &i); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (matcher *ValidJSONMatcher) FailureMessage(actual any) (message string) {
+	return format.Message(actual, "to be valid JSON")
+}
+
+func (matcher *ValidJSONMatcher) NegatedFailureMessage(actual any) (message string) {
+	return format.Message(actual, "to _not_ be valid JSON")
 }

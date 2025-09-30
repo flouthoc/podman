@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v3/cmd/podman/common"
-	"github.com/containers/podman/v3/cmd/podman/registry"
-	"github.com/containers/podman/v3/pkg/domain/entities"
-	"github.com/pkg/errors"
+	"github.com/containers/podman/v5/cmd/podman/common"
+	"github.com/containers/podman/v5/cmd/podman/registry"
+	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
 )
 
 var (
@@ -26,7 +25,25 @@ var (
 	}
 )
 
-var format string
+var (
+	format string
+	pretty bool
+)
+
+const (
+	prettyTemplate = `ID:              {{.ID}}
+Name:              {{.Spec.Name}}
+{{- if .Spec.Labels }}
+Labels:
+{{- range $k, $v := .Spec.Labels }}
+ - {{ $k }}{{if $v }}={{ $v }}{{ end }}
+{{- end }}{{ end }}
+Driver:            {{.Spec.Driver.Name}}
+Created at:        {{.CreatedAt}}
+Updated at:        {{.UpdatedAt}}`
+)
+
+var inspectOpts = entities.SecretInspectOptions{}
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -35,34 +52,51 @@ func init() {
 	})
 	flags := inspectCmd.Flags()
 	formatFlagName := "format"
-	flags.StringVar(&format, formatFlagName, "", "Format volume output using Go template")
-	_ = inspectCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(entities.SecretInfoReport{}))
+	flags.StringVarP(&format, formatFlagName, "f", "", "Format inspect output using Go template")
+	_ = inspectCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.SecretInfoReport{}))
+
+	flags.BoolVar(&inspectOpts.ShowSecret, "showsecret", false, "Display the secret")
+
+	prettyFlagName := "pretty"
+	flags.BoolVar(&pretty, prettyFlagName, false, "Print inspect output in human-readable format")
 }
 
 func inspect(cmd *cobra.Command, args []string) error {
-	inspected, errs, _ := registry.ContainerEngine().SecretInspect(context.Background(), args)
+	inspected, errs, _ := registry.ContainerEngine().SecretInspect(context.Background(), args, inspectOpts)
 
 	// always print valid list
 	if len(inspected) == 0 {
 		inspected = []*entities.SecretInfoReport{}
 	}
 
-	if cmd.Flags().Changed("format") {
-		row := report.NormalizeFormat(format)
-		formatted := report.EnforceRange(row)
+	switch {
+	case cmd.Flags().Changed("pretty"):
+		rpt := report.New(os.Stdout, cmd.Name())
+		defer rpt.Flush()
 
-		tmpl, err := report.NewTemplate("inspect").Parse(formatted)
+		rpt, err := rpt.Parse(report.OriginUser, prettyTemplate)
 		if err != nil {
 			return err
 		}
 
-		w, err := report.NewWriterDefault(os.Stdout)
+		if err := rpt.Execute(inspected); err != nil {
+			return err
+		}
+
+	case cmd.Flags().Changed("format"):
+		rpt := report.New(os.Stdout, cmd.Name())
+		defer rpt.Flush()
+
+		rpt, err := rpt.Parse(report.OriginUser, format)
 		if err != nil {
 			return err
 		}
-		defer w.Flush()
-		tmpl.Execute(w, inspected)
-	} else {
+
+		if err := rpt.Execute(inspected); err != nil {
+			return err
+		}
+
+	default:
 		buf, err := json.MarshalIndent(inspected, "", "    ")
 		if err != nil {
 			return err
@@ -76,7 +110,7 @@ func inspect(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "error inspecting secret: %v\n", err)
 			}
 		}
-		return errors.Errorf("error inspecting secret: %v", errs[0])
+		return fmt.Errorf("inspecting secret: %w", errs[0])
 	}
 	return nil
 }
