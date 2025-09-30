@@ -2,7 +2,6 @@ package report
 
 import (
 	"io"
-	"maps"
 	"strings"
 	"text/tabwriter"
 	"text/template"
@@ -110,8 +109,12 @@ func (f *Formatter) Parse(origin Origin, text string) (*Formatter, error) {
 // A default template function will be replaced if there is a key collision.
 func (f *Formatter) Funcs(funcMap template.FuncMap) *Formatter {
 	m := make(template.FuncMap, len(DefaultFuncs)+len(funcMap))
-	maps.Copy(m, DefaultFuncs)
-	maps.Copy(m, funcMap)
+	for k, v := range DefaultFuncs {
+		m[k] = v
+	}
+	for k, v := range funcMap {
+		m[k] = v
+	}
 	f.template = f.template.Funcs(funcMap)
 	return f
 }

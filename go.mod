@@ -192,3 +192,9 @@ require (
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 	tags.cncf.io/container-device-interface/specs-go v1.0.0 // indirect
 )
+
+replace go.podman.io/common => github.com/flouthoc/container-libs/common v0.0.0-20250930173032-1c4784fd3be4
+
+replace go.podman.io/storage => github.com/flouthoc/container-libs/storage v0.0.0-20250930173032-1c4784fd3be4
+
+replace go.podman.io/image/v5 => github.com/flouthoc/container-libs/image/v5 v5.0.0-20250930173032-1c4784fd3be4

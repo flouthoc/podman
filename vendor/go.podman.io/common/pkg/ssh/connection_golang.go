@@ -166,7 +166,8 @@ func golangConnectionScp(options ConnectionScpOptions) (*ConnectionScpReport, er
 
 	parent := filepath.Dir(remoteFile)
 	path := string(filepath.Separator)
-	for dir := range strings.SplitSeq(parent, path) {
+	dirs := strings.Split(parent, path)
+	for _, dir := range dirs {
 		path = filepath.Join(path, dir)
 		// ignore errors due to most of the dirs already existing
 		_ = sc.Mkdir(path)

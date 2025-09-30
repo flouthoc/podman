@@ -38,8 +38,8 @@ func nativeConnectionCreate(options ConnectionCreateOptions) error {
 		return err
 	}
 
-	if host, _, ok := strings.Cut(uri.Host, "/run"); ok {
-		uri.Host = host
+	if strings.Contains(uri.Host, "/run") {
+		uri.Host = strings.Split(uri.Host, "/run")[0]
 	}
 	conf, err := config.Default()
 	if err != nil {
@@ -114,8 +114,8 @@ func nativeConnectionExec(options ConnectionExecOptions, input io.Reader) (*Conn
 
 	output := &bytes.Buffer{}
 	errors := &bytes.Buffer{}
-	if host, _, ok := strings.Cut(uri.Host, "/run"); ok {
-		uri.Host = host
+	if strings.Contains(uri.Host, "/run") {
+		uri.Host = strings.Split(uri.Host, "/run")[0]
 	}
 
 	options.Args = append([]string{uri.User.String() + "@" + uri.Hostname()}, options.Args...)
